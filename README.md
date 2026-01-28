@@ -1,4 +1,4 @@
-A simple FastAPI based server that handles movie trimming and subtitles merging
+# A simple FastAPI based server that handles movie trimming and subtitles merging
 
 Installation:
 
