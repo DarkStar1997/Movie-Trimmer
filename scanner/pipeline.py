@@ -57,7 +57,7 @@ def run_scan(
     smoothing: SmoothingConfig,
     sample_fps: float = config.DEFAULT_SAMPLE_FPS,
     model: str = None,
-    backend: str = "auto",
+    backend: str = "trt",
     fp32: bool = False,
     batch_size: int = config.DEFAULT_BATCH_SIZE,
     track: bool = config.DEFAULT_TRACK,

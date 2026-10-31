@@ -6,6 +6,11 @@ Endpoints:
                    `sample_fps`, `model`, `backend`
   GET  /scan/{id}  status + result (segments in seconds)
   GET  /scans      list
+  POST /blur       mask-precision blur render (stage C): segments from a
+                   completed scan_id or explicit JSON; optional preview
+                   window; NVDEC decode, NVENC encode with explicit CQ
+  GET  /blur/{id}  status + output path
+  GET  /blurs      list
   GET  /health     gpu/engine/model diagnostics
 
 Run single-worker only (in-memory job store):
@@ -24,7 +29,8 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadF
 from fastapi.responses import JSONResponse
 
 from . import config
-from .jobs import new_scan_entry, run_scan_job, scan_store
+from .jobs import (blur_store, new_blur_entry, new_scan_entry, resolve_segments,
+                   run_blur_job, run_scan_job, scan_store)
 from .pipeline import registry
 from .schemas import ScanResult
 
@@ -62,7 +68,7 @@ async def submit_scan(
     smoothing: str | None = Form(None, description="JSON smoothing overrides"),
     sample_fps: float = Form(config.DEFAULT_SAMPLE_FPS),
     model: str = Form(config.DEFAULT_MODEL),
-    backend: str = Form("auto"),
+    backend: str = Form("trt"),
     fp32: bool = Form(False),
     track: bool = Form(config.DEFAULT_TRACK),
     arbiter: bool = Form(config.DEFAULT_ARBITER),
@@ -126,6 +132,65 @@ def get_scan(scan_id: str):
     if scan_id not in scan_store:
         raise HTTPException(404, "scan id not found")
     return scan_store[scan_id]
+
+
+@app.post("/blur", status_code=202)
+async def submit_blur(
+    background_tasks: BackgroundTasks,
+    video_path: str = Form(..., description="Path to a mounted video"),
+    segments: str | None = Form(None,
+                                description="JSON [[start, end], ...] seconds"),
+    scan_id: str | None = Form(None,
+                               description="Take segments from this scan "
+                                           "(its policy is reused unless "
+                                           "overridden)"),
+    policy: str | None = Form(None, description="JSON policy overrides"),
+    window_start: float | None = Form(None,
+                                      description="Render only from here (s)"),
+    window_end: float | None = Form(None,
+                                    description="Render only until here (s)"),
+    cq: int | None = Form(None, ge=1, le=51),
+    pixels: int | None = Form(None, ge=4, le=96),
+):
+    if not Path(video_path).exists():
+        raise HTTPException(400, f"video_path not found: {video_path}")
+    if (window_start is None) != (window_end is None):
+        raise HTTPException(400, "window_start and window_end come together")
+    policy_overrides = _parse_json_field(policy, "policy")
+    try:
+        segs = resolve_segments(segments, scan_id)
+        if policy_overrides is None and scan_id is not None:
+            # consistency: blur with the same policy the scan was judged by
+            policy_overrides = scan_store[scan_id].get("policy")
+        from .policy import Policy
+        Policy.from_overrides(policy_overrides)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    blur_id = new_blur_entry(Path(video_path).name)
+    window = ((window_start, window_end) if window_start is not None
+              else None)
+    background_tasks.add_task(
+        run_blur_job, blur_id, video_path, segs, policy_overrides,
+        window, cq, pixels)
+    return JSONResponse({
+        "blur_id": blur_id,
+        "status": blur_store[blur_id]["status"],
+        "status_url": f"/blur/{blur_id}",
+        "note": "output lands in the container's BLUR_OUTPUT_DIR",
+    }, status_code=202)
+
+
+@app.get("/blur/{blur_id}")
+def get_blur(blur_id: str):
+    if blur_id not in blur_store:
+        raise HTTPException(404, "blur id not found")
+    return blur_store[blur_id]
+
+
+@app.get("/blurs")
+def list_blurs():
+    return list(blur_store.values())
 
 
 @app.get("/scans")

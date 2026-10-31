@@ -12,13 +12,21 @@ import json
 import logging
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Iterator
 
 import numpy as np
 
+from . import config
+
 logger = logging.getLogger(__name__)
+
+
+class DecoderStalled(RuntimeError):
+    """ffmpeg stopped producing frames (NVDEC wedge). The caller may retry
+    once with use_hwaccel=False."""
 
 
 def probe_duration(path: str) -> float:
@@ -59,24 +67,43 @@ class FFmpegPipeDecoder:
     """
 
     def __init__(self, path: str, *, fps: float, width: int, height: int,
-                 use_hwaccel: bool = True):
+                 use_hwaccel: bool = True, start: float | None = None,
+                 duration: float | None = None, exact: bool = False,
+                 stall_timeout_s: float | None = None):
         self.path = path
         self.fps = float(fps)
         self.width = int(width)
         self.height = int(height)
         self.frame_size = self.width * self.height * 3
+        self.start = float(start) if start is not None else None
+        self.duration = float(duration) if duration is not None else None
+        # exact=True: no fps filter — frames pass through 1:1 (render path,
+        # where frame counts must match source packet counts exactly)
+        self.exact = exact
+        self.stall_timeout_s = (config.BLUR_STALL_TIMEOUT_S
+                                if stall_timeout_s is None else stall_timeout_s)
+        self._stalled = False
+        self._watchdog: threading.Thread | None = None
+        self._last_read = time.monotonic()
         self._cmd_base = [
             "ffmpeg", "-hide_banner", "-loglevel", "error",
         ]
+        if self.start is not None:
+            # input seeking: keyframe seek + decode-forward, frame-accurate
+            self._cmd_base += ["-ss", f"{self.start:.3f}"]
+        if self.duration is not None:
+            self._cmd_base += ["-t", f"{self.duration:.3f}"]
         if use_hwaccel:
             self._cmd_base += ["-hwaccel", "cuda"]
         self._proc: subprocess.Popen | None = None
         self.frames_yielded = 0
 
     def _full_cmd(self) -> list[str]:
-        return self._cmd_base + [
-            "-i", self.path,
-            "-vf", f"fps={self.fps},scale={self.width}:{self.height}",
+        args = self._cmd_base + ["-i", self.path]
+        if not self.exact:
+            args += ["-vf",
+                     f"fps={self.fps},scale={self.width}:{self.height}"]
+        return args + [
             "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
         ]
 
@@ -108,17 +135,54 @@ class FFmpegPipeDecoder:
         self.close()
 
     def frames(self) -> Iterator[np.ndarray]:
+        """Yield frames; raises DecoderStalled if ffmpeg wedges (NVDEC quirk:
+        the process survives but stops producing output — kill + fail loud
+        instead of blocking forever)."""
         assert self._proc is not None and self._proc.stdout is not None
-        while True:
-            buf = self._proc.stdout.read(self.frame_size)
-            if not buf:
-                break
-            if len(buf) < self.frame_size:
-                # truncated tail frame — drop it
-                break
-            self.frames_yielded += 1
-            yield np.frombuffer(buf, dtype=np.uint8).reshape(
-                self.height, self.width, 3)
+        self._start_watchdog()
+        try:
+            while True:
+                buf = self._proc.stdout.read(self.frame_size)
+                self._last_read = time.monotonic()
+                if not buf:
+                    break
+                if len(buf) < self.frame_size:
+                    # truncated tail frame — drop it
+                    break
+                self.frames_yielded += 1
+                yield np.frombuffer(buf, dtype=np.uint8).reshape(
+                    self.height, self.width, 3)
+        finally:
+            self._stop_watchdog()
+        if self._stalled:
+            raise DecoderStalled(
+                f"decoder produced no frame for {self.stall_timeout_s}s "
+                f"(NVDEC wedge?) — killed. {self.path} @ {self.start}")
+
+    def _start_watchdog(self) -> None:
+        if self._watchdog is not None:
+            return
+
+        def _watch() -> None:
+            proc = self._proc
+            while proc is not None and proc.poll() is None:
+                time.sleep(2.0)
+                if time.monotonic() - self._last_read > self.stall_timeout_s:
+                    self._stalled = True
+                    logger.warning("[decode] stalled %.0fs — killing ffmpeg",
+                                   self.stall_timeout_s)
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+                    return
+
+        self._watchdog = threading.Thread(target=_watch, daemon=True)
+        self._watchdog.start()
+
+    def _stop_watchdog(self) -> None:
+        # daemon thread: exits on its own once the process is dead
+        self._watchdog = None
 
     def close(self) -> None:
         if self._proc is not None:

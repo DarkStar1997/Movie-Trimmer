@@ -214,6 +214,7 @@ models/
 trt_cache/
 scan_workspaces/
 scans/
+blur_outputs/
 
 # Movie files — never commit video content (test clips, sources, outputs)
 *.mp4

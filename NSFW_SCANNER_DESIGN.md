@@ -270,3 +270,123 @@ Frame budget: 41 segments x 3 verify + thinned 10s-before/45s-after windows
 consumed all 250 slots, leaving none for the global sweep — known isolated
 spots (e.g. 01:40:23) can go unsampled; raise `ARBITER_MAX_FRAMES` or trim
 `ARBITER_WINDOW_AFTER_S` if sweep coverage matters.
+
+## 8. Stage C: mask-precision blur render (empirical, 2026-10-31)
+
+Architecture: two passes. **Analysis** decodes only flagged ranges at
+8 fps (BLUR_KEYFRAME_FPS) at scan resolution, runs NudeNet per batch, and
+for every keyframe with policy-triggering detections composes
+
+    mask = union over explicit boxes of ( person_mask(box) AND padded_box )
+
+with a padded-box rectangle fallback when RF-DETR finds no matching person
+(close-up crops are exactly when the box matters). Masks are dilated
+(~1.2% of frame width) and stored packbits-compressed per keyframe.
+**Render** (full movies: GPU-native path below) decodes the whole movie,
+and for frames inside a segment holds the most recent keyframe mask
+(upscaled nearest), pixelates through it (24 px blocks at 1080p), and
+encodes with NVENC.
+
+### Validation findings (Ex Machina 1080p)
+
+- Mask coverage of the explicit box: **96-100% on every keyframe** of the
+  5628.8-5636.2 test segment (person-mask intersection is doing real work
+  vs a bare box: blur region tracks the torso, not a full-frame box).
+- Only keyframes with passing detections carry masks (22-27 of 68 per
+  segment) — the hold logic bridges detector flicker *within* the segment,
+  and pre-first-keyframe frames reuse the first mask (blur early, not
+  late).
+- Policy consistency: analysis must run the SAME policy the scan judged
+  by. Default policy (0.45 triggers) vs the scan's tuned (0.30/0.001) lost
+  the first 1.25s of the test segment. `/blur` now reuses the scan's
+  policy automatically when `scan_id` is given and no override is passed.
+
+### NVENC findings (RTX 4090, driver 615.78.08, ffmpeg n9.0.2)
+
+- **`av1_nvenc` fails with `-22 EINVAL` on the rawvideo-pipe path** —
+  bare encoder, every preset/rc combination. The trimmer's ANALYSIS.md
+  av1 success went through `-hwaccel_output_format cuda` (frames already
+  on the GPU); with piped CPU frames the encoder rejects the session.
+  av1 is therefore excluded from `BLUR_CODECS`.
+- `hevc_nvenc` / `h264_nvenc` with `-preset p5 -tune hq -rc vbr -cq N
+  -b:v 0 -spatial-aq 1 -rc-lookahead 32` work; the chain falls back
+  `hevc_nvenc -> h264_nvenc -> libx264` (a codec that fails fast at init
+  is skipped after a 1.5s probe).
+- Explicit rate control is mandatory: NVENC defaults to ~2 Mbps VBR,
+  visibly inadequate for 1080p film (trimmer ANALYSIS.md finding; CQ 26
+  default here).
+
+### Numbers
+
+- Window render (25s window, 1 segment): analysis + render = 15-32s wall.
+- Full-movie GPU-native render (Ex Machina 1080p, 6481s, 155,385 frames,
+  41 segments / 920 mask keyframes): **285s wall = 22.7x realtime**, 7,452
+  frames blurred (4.8%), NVDEC→torch→NVENC never touching CPU memory.
+
+### Full-movie verification (Ex Machina, GPU-native render, 2026-11-01)
+
+Every check passed end-to-end:
+
+- container: hevc+aac, duration 6480.96s == source exactly.
+- decode clean (`-err_detect explode` over the full file).
+- **155,385 video packets == source packet count exactly** — one
+  continuous pass, no cut boundaries, so nothing can drift.
+- **audio bit-exact**: packet pts/dts/size md5 identical to the source.
+- frame identity: sampled output frames each match a source frame to zero
+  hot pixels at display time. (The output's raw PTS grid sits 2-3 frames
+  earlier than the source's edit-list offset — the muxer compensates the
+  source's 0.083s video start; display timelines align.)
+- blur present inside segments: local texture (3x3 std) crushed to
+  ~0.2-0.4x of source inside mask regions; clean ranges pixel-exact up to
+  codec noise.
+- One content caveat, not a defect: on ultra-smooth soft-focus scenes
+  (seg 0, source local-std p95 ≈ 4) the 24px mosaic changes values by <30
+  for 98.7% of mask pixels — mathematically applied (verified against an
+  in-process emulation: 671 vs 672 hot px) but barely visible, because
+  pixelate destroys *texture*, not *silhouettes*. A bigger BLUR_PIXELS
+  does not change this; a different blur style (gaussian/solid) would.
+
+### Splice rendering — attempted, then abandoned (documented failure)
+
+To avoid re-encoding 108 minutes for 350s of flagged footage, a
+stream-copy-splice renderer (copy unflagged ranges, re-encode only
+[segment, next keyframe) windows, MPEG-TS concat) was built and validated
+in prototype — then failed twice on real-movie boundaries despite verified
+packet counts: ffmpeg's copy-cut semantics (dts vs pts, per-edge rounding,
+mp4 timescale quantization) made every part boundary a fresh off-by-one,
+and each fix relocated the failure. The lesson: **never trust ffmpeg's
+cutter at frame granularity — prefer designs with no cuts at all.**
+
+### GPU-native rendering (production path)
+
+The replacement — one continuous pass, so there are no cut boundaries to
+get wrong:
+
+    CreateDemuxer -> CreateDecoder (NVDEC, device memory)
+                  -> torch.from_dlpack(frame)   # NV12 view, zero-copy
+                  -> in-place block pixelate of Y+UV through the held
+                     person mask (avg_pool + nearest-up + where, on GPU)
+                  -> CreateEncoder (NVENC hevc, P5, high_quality tuning,
+                     VBR + explicit CQ)
+                  -> FFmpegMuxer (audio/subs passthrough, bit-exact PTS)
+
+- PyNvVideoCodec 2.2.3 (no pycuda needed: `cudacontext=0` shares torch's
+  primary context; pycuda won't even build in the runtime image). DLPack
+  hands NVDEC's NV12 surface to torch as a (h*3/2, w) uint8 view and
+  in-place writes flow into NVENC — frames never touch CPU memory.
+- PTS set verified identical to the source on a PoC; the muxer maps output
+  PTS from the source packets (RecordSourceVideoPacket), so the timeline
+  and A/V sync are structurally exact.
+- NV12 masks: luma mask at full res; chroma mask = 2x2-union of luma
+  repeated to the interleaved UV plane (a masked macropixel's U and V
+  share the decision).
+- NVDEC-wedge insurance: a per-packet progress watchdog aborts a hung
+  decode instead of blocking the job forever.
+
+### TRT-only backends (policy)
+
+A silent ORT fallback let the first full render crawl at 28 CPU cores for 8
+minutes (personseg auto-picked CPU ORT in-container). Backends are now TRT
+by default and fail loudly when TRT cannot init ("ort" remains an explicit
+host-test-only opt-in). The RF-DETR Seg Medium FP32 engine builds in ~12s
+and analysis of a 7s segment drops ~27s → ~1.5s.

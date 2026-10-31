@@ -109,6 +109,28 @@ TRACK_EXPLICIT_HOLD_S = 8.0
 TRACK_REFRESH_FLOOR = 0.15    # sub-trigger explicit score that still refreshes
 TRACK_MAX_LOST_SAMPLES = 3    # coasting samples (~0.75s @4fps) before retirement
 
+# --- Stage C: person segmentation + blur render --------------------------------
+# RF-DETR Seg Medium (COCO person class only at runtime; FP32 TRT engine).
+PERSON_SEG = {
+    "onnx": "person_seg_rfdetr_seg_medium_v1.onnx",
+    "resolution": 432,
+}
+# Blur render defaults. Blur region = person mask AND padded explicit box.
+BLUR_KEYFRAME_FPS = 8.0     # NudeNet+personseg rate inside flagged ranges
+BLUR_BOX_PAD_FRAC = 0.35    # explicit box padding before mask intersection
+BLUR_MASK_DILATE_FRAC = 0.012   # mask dilation, fraction of frame width
+BLUR_PIXELS = 24            # pixelate block size at 1080p (scaled by width)
+# Fallback chain, first usable wins. NB: av1_nvenc is deliberately absent —
+# it fails with -22 EINVAL on this host/driver even bare (rawvideo-pipe path),
+# while hevc/h264 accept the full quality args. libx264 = CPU last resort.
+BLUR_CODECS = ("hevc_nvenc", "h264_nvenc", "libx264")
+BLUR_CQ = 26                # NVENC constant-quality (libx264 crf equivalent)
+# Kill a decode that produced no frame for this long (NVDEC wedge quirk)
+# instead of blocking the job forever; pipe-path callers retry once on CPU.
+BLUR_STALL_TIMEOUT_S = float(os.environ.get("BLUR_STALL_TIMEOUT_S", "120"))
+# Writable output dir (bind-mount it; movies are mounted read-only)
+BLUR_OUTPUT_DIR = str(Path(os.environ.get("BLUR_OUTPUT_DIR", "blur_outputs")))
+
 # --- Stage B: VLM arbiter (sparse Qwen3-VL pass) -------------------------------
 # Never every frame: verify N frames per final segment, sample windows around
 # segments (flicker gaps / short continuations), plus a coarse global sweep for

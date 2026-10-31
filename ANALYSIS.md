@@ -25,7 +25,7 @@ correct subtitle timeline math. Jobs run as FastAPI `BackgroundTasks`, throttled
 
 | Check | Result |
 |---|---|
-| `av1_nvenc` available | ✅ (h264/hevc/av1 nvenc all present) |
+| `av1_nvenc` available | ✅ (h264/hevc/av1 nvenc all present) — but see scanner note: it fails `-22 EINVAL` when fed via the **rawvideo pipe** path (CPU frames); it only works with `-hwaccel_output_format cuda` GPU-side frames |
 | `-ss` before `-i` + CUDA decode frame-accurate | ✅ 30/30 frames on a 1s @ 30fps cut |
 | `av1_nvenc` default rate control | ⚠️ ~2 Mbps VBR (CPB avg 2000000) — no `-b:v`/`-cq` set in code |
 | Opus→MP4 concat **without** `-strict -2` | ✅ works on ffmpeg 9.0.2 (older builds reject it) |

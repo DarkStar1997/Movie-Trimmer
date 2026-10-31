@@ -212,7 +212,7 @@ def postprocess(output_b: np.ndarray, frame_w: int, frame_h: int,
 # --- detector -----------------------------------------------------------------
 
 class NudeNetDetector:
-    def __init__(self, model_name: str = None, *, backend: str = "auto",
+    def __init__(self, model_name: str = None, *, backend: str = "trt",
                  batch_size: int = config.DEFAULT_BATCH_SIZE, fp32: bool = False):
         model_name = model_name or config.DEFAULT_MODEL
         if model_name not in config.MODELS:
@@ -228,8 +228,9 @@ class NudeNetDetector:
                 f"at /opt/models (see scanner.Dockerfile)")
         self.batch_size = batch_size
 
-        if backend == "auto":
-            backend = "trt" if _trt_available() else "ort"
+        # TRT is the production backend; "ort" exists for host unit tests
+        # only. No silent fallback: a TRT failure must fail the job loudly
+        # (fix the engine/container, don't crawl on CPU).
         if backend == "trt":
             self.backend = TrtBackend(self.onnx_path, res,
                                       batch_size=batch_size, fp32=fp32)
@@ -238,23 +239,30 @@ class NudeNetDetector:
             self.backend = OrtBackend(self.onnx_path)
             self.backend_name = "ort"
         else:
-            raise ValueError(f"unknown backend {backend!r}")
+            raise ValueError(f"unknown backend {backend!r} "
+                             f"(use 'trt'; 'ort' is test-only)")
         logger.info("[detector] %s @ %dpx via %s",
                     model_name, res, self.backend_name)
 
     def detect_frames(self, frames: Sequence[np.ndarray]) -> list[list[Detection]]:
-        """Batch-detect a list of same-size RGB uint8 frames."""
+        """Batch-detect a list of same-size RGB uint8 frames.
+
+        Chunks at self.batch_size: TRT engines are profiled up to that batch
+        (an oversized vstack would exceed the profile max batch).
+        """
         if not frames:
             return []
-        blobs, pads = [], []
-        for f in frames:
-            blob, xp, yp = preprocess(f, self.resolution)
-            blobs.append(blob)
-            pads.append((xp, yp))
-        blob = np.vstack(blobs)
-        out = self.backend.infer(blob)  # [B, 22, N]
-        h, w = frames[0].shape[:2]
-        results = []
-        for b, (xp, yp) in enumerate(pads):
-            results.append(postprocess(out[b], w, h, xp, yp, self.resolution))
+        results: list[list[Detection]] = []
+        for off in range(0, len(frames), self.batch_size):
+            chunk = frames[off:off + self.batch_size]
+            blobs, pads = [], []
+            for f in chunk:
+                blob, xp, yp = preprocess(f, self.resolution)
+                blobs.append(blob)
+                pads.append((xp, yp))
+            blob = np.vstack(blobs)
+            out = self.backend.infer(blob)  # [B, 22, N]
+            h, w = chunk[0].shape[:2]
+            for b, (xp, yp) in enumerate(pads):
+                results.append(postprocess(out[b], w, h, xp, yp, self.resolution))
         return results

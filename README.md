@@ -41,6 +41,7 @@ docker build -f scanner.Dockerfile -t ghcr.io/darkstar1997/movie-trimmer-scanner
 # ./scan_workspaces (upload scratch), ./scans (results)
 docker run --gpus all -p 8081:8081 \
   -v "$PWD/trt_cache:/cache/trt" \
+  -v "$PWD/blur_outputs:/outputs" -e BLUR_OUTPUT_DIR=/outputs \
   -v "$PWD:/movies:ro" \
   ghcr.io/darkstar1997/movie-trimmer-scanner:v1
 ```
@@ -64,7 +65,22 @@ curl -X POST http://localhost:8081/scan \
   -F video_path=/movies/film.mkv \
   -F arbiter=true -F arbiter_mode=verify
 
-# feed the result to the trimmer (segments JSON = seconds)
+# stage C blur: mask-precision pixelation instead of cutting. Segments from
+# a scan_id (its policy is reused) or explicit JSON; optional preview window.
+curl -X POST http://localhost:8081/blur \
+  -F video_path=/movies/film.mkv -F scan_id={scan_id}
+curl -X POST http://localhost:8081/blur \
+  -F video_path=/movies/film.mkv \
+  -F 'segments=[[844.8, 859.5]]' \
+  -F window_start=840 -F window_end=865    # fast preview render
+curl http://localhost:8081/blur/{blur_id}   # status -> output path in /outputs
+# full renders are one continuous GPU-native pass: NVDEC -> torch (zero-copy
+# NV12) -> RF-DETR person-mask pixelation on the GPU -> NVENC (hevc, P5 hq,
+# VBR + explicit CQ); frames never touch the CPU, audio/subs passthrough with
+# bit-exact PTS — no cut boundaries, so the timeline cannot drift.
+# Previews re-encode the window only (pipe path).
+
+# feed a scan result to the trimmer (segments JSON = seconds)
 curl -X POST http://localhost:8000/submit -F file=@film.mkv \
   -F subtitle_file=@film.srt \
   -F 'segments=[[12.5, 45.0], [620.25, 700.5]]'

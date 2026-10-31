@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
 import shutil
 import uuid
@@ -39,8 +40,7 @@ def new_scan_entry(video_name: str) -> str:
     return scan_id
 
 
-async def run_scan_job(scan_id: str, video_path: str,
-                       policy_overrides: Optional[dict],
+async def run_scan_job(scan_id: str, video_path: str,                       policy_overrides: Optional[dict],
                        smoothing_overrides: Optional[dict],
                        sample_fps: float, model: Optional[str],
                        backend: str, fp32: bool,
@@ -78,3 +78,73 @@ async def run_scan_job(scan_id: str, video_path: str,
     finally:
         if workspace and workspace.exists():
             shutil.rmtree(workspace, ignore_errors=True)
+
+
+# --- blur jobs (stage C) ---------------------------------------------------------
+
+blur_store: Dict[str, Dict[str, Any]] = {}
+blur_semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_SCANS)
+
+
+def new_blur_entry(video_name: str) -> str:
+    blur_id = str(uuid.uuid4())
+    blur_store[blur_id] = {
+        "blur_id": blur_id,
+        "status": "queued",
+        "submitted_at": datetime.now().isoformat(),
+        "video": video_name,
+        "output": None,
+        "error": None,
+    }
+    return blur_id
+
+
+def resolve_segments(segments_json: Any, scan_id: str | None) -> list[dict]:
+    """Segments for a blur job: explicit JSON list, or a completed scan's."""
+    if scan_id is not None:
+        if scan_id not in scan_store:
+            raise ValueError(f"scan id not found: {scan_id}")
+        entry = scan_store[scan_id]
+        if entry["status"] != "completed":
+            raise ValueError(f"scan {scan_id} is {entry['status']}, not completed")
+        return [dict(s) for s in entry["segments"]]
+    if isinstance(segments_json, str):
+        segments_json = json.loads(segments_json)
+    if not isinstance(segments_json, (list, tuple)) or not segments_json:
+        raise ValueError("segments must be a non-empty [[start, end], ...]")
+    out = []
+    for seg in segments_json:
+        a, b = float(seg[0]), float(seg[1])
+        if not (0.0 <= a < b):
+            raise ValueError(f"invalid segment [{a}, {b}]")
+        out.append({"start": a, "end": b})
+    return out
+
+
+async def run_blur_job(blur_id: str, video_path: str, segments: list[dict],
+                        policy_overrides: Optional[dict],
+                        window: Optional[tuple], cq: Optional[int],
+                        pixels: Optional[int]) -> None:
+    entry = blur_store[blur_id]
+    try:
+        async with blur_semaphore:
+            entry["status"] = "processing"
+            from .blur import run_blur
+            policy = Policy.from_overrides(policy_overrides)
+            out_dir = Path(config.BLUR_OUTPUT_DIR)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out = out_dir / f"blurred_{blur_id[:8]}.mp4"
+            fn = functools.partial(
+                run_blur, video_path, segments, str(out), policy=policy,
+                window=window, cq=cq, pixels=pixels)
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, fn)
+            entry.update(result)
+            entry["status"] = "completed"
+            logger.info("[blur %s] completed: %d frames, %d blurred, codec=%s",
+                        blur_id, result["frames"], result["frames_blurred"],
+                        result["codec"])
+    except Exception as e:  # noqa: BLE001
+        logger.exception("[blur %s] failed", blur_id)
+        entry["status"] = "failed"
+        entry["error"] = str(e)
