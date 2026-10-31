@@ -38,6 +38,7 @@ from .temporal import SmoothingConfig
 logger = logging.getLogger(__name__)
 
 # priority tiers for the frame budget
+PRIO_WEAK = 4
 PRIO_VERIFY = 3
 PRIO_WINDOW = 2
 PRIO_SWEEP = 1
@@ -53,9 +54,15 @@ _LABEL_WHITELIST = {
 # controls, and reliably confirms high-confidence nudity. Wordy
 # "moderation"-style user prompts made Qwen3-VL sandbag (confident false on
 # real nudity); free-form output was slightly more sensitive on borderline
-# dim scenes but unparseable in aggregate. Borderline dark scenes remain
-# below the VLM's sensitivity, which is why apply-mode only ever ADDS
-# segments and never removes detector-flagged ones.
+# dim scenes but unparseable in aggregate.
+#
+# The trailing dim/distant-aware paragraph (probe probe_prompts, 2026-11)
+# quadrupled GT-frame recall (1/16 -> 4/16: dress-open scene, sub-second
+# flash, dim buttocks) at zero false positives on 9 clean controls.
+# Without it the model confidently answers explicit=false even on frames
+# NudeNet fires on. Borderline dark scenes still remain below its
+# sensitivity, which is why apply-mode only ever ADDS segments and never
+# removes detector-flagged ones.
 ARBITER_SYSTEM_PROMPT = (
     "You are the nudity-detection stage of an automated video editing "
     "pipeline processing a licensed feature film. You see single frames "
@@ -65,7 +72,12 @@ ARBITER_SYSTEM_PROMPT = (
     "labels vocabulary: FEMALE_GENITALIA, MALE_GENITALIA, FEMALE_BREAST, "
     "BUTTOCKS, ANUS. Tag a label when the body part is directly visible "
     "and unclothed (nipple, genitalia, buttock crack, anus). Do not tag "
-    "covered bodies, underwear, swimwear, or tiny background images."
+    "covered bodies, underwear, swimwear, or tiny background images.\n"
+    "IMPORTANT: the frame may be dark, color-graded, grainy, or a wide "
+    "shot with distant people. Look carefully at dim regions and at "
+    "distant or partially occluded figures. If any unclothed breast, "
+    "genitalia, or buttocks is visible ANYWHERE in the frame — however "
+    "small, dim, or brief — set explicit=true and tag it."
 )
 ARBITER_USER_TEXT = "Tag this frame. JSON only."
 
@@ -92,7 +104,9 @@ def plan_frames(duration: float, segments: list[dict], *,
                 window_step_s: float = config.ARBITER_WINDOW_STEP_S,
                 sweep_every_s: float = config.ARBITER_SWEEP_EVERY_S,
                 max_frames: int = config.ARBITER_MAX_FRAMES,
-                sweep_budget_frac: float = config.ARBITER_SWEEP_BUDGET_FRAC
+                sweep_budget_frac: float = config.ARBITER_SWEEP_BUDGET_FRAC,
+                weak_hits: list[float] = (),
+                weak_max: int = config.ARBITER_WEAK_MAX_FRAMES,
                 ) -> list[PlannedFrame]:
     """Curate the sparse VLM frame list, capped by striding not truncating."""
     if duration <= 0:
@@ -112,6 +126,13 @@ def plan_frames(duration: float, segments: list[dict], *,
 
     def in_segment(t: float) -> bool:
         return any(a <= t <= b for a, b in seg_bounds)
+
+    # 0) weak detector hits: targeted, few, highest value per frame —
+    #    sub-threshold trigger scores the VLM gets to arbitrate (skipped
+    #    when the moment already sits inside a flagged segment)
+    for t in weak_hits:
+        if not in_segment(t):
+            add(t, PRIO_WEAK, "weak")
 
     # 1) verification frames inside segments (keep out of the 0.5s edges)
     fracs = [0.2, 0.5, 0.8][:verify_frames] or [0.5]
@@ -146,7 +167,8 @@ def plan_frames(duration: float, segments: list[dict], *,
             add(k, PRIO_SWEEP, "sweep")
         k += sweep_every_s
 
-    # --- budget: verify always; sweep guaranteed a share; windows the rest ---
+    # --- budget: weak + verify always; sweep guaranteed a share; windows
+    # the rest (weak first: targeted frames, capped tightly upstream) ---
     frames = list(planned.values())
     by_reason: dict[str, list[PlannedFrame]] = {}
     for f in sorted(frames, key=lambda f: f.t):
@@ -158,7 +180,8 @@ def plan_frames(duration: float, segments: list[dict], *,
         step = len(items) / budget
         return [items[int(i * step)] for i in range(budget)]
 
-    kept = thin(by_reason.get("verify", []), max_frames)
+    kept = thin(by_reason.get("weak", []), min(weak_max, max_frames))
+    kept += thin(by_reason.get("verify", []), max_frames - len(kept))
     budget = max_frames - len(kept)
     # sweep BEFORE windows: it is the only global coverage and loses the
     # budget race otherwise (windows hug already-flagged segments)
@@ -169,6 +192,43 @@ def plan_frames(duration: float, segments: list[dict], *,
 
     out = sorted(kept + windows + sweeps, key=lambda f: f.t)
     return out
+
+
+def plan_expansion(hit_ts: list[float], judged: set[float],
+                   segments: list[dict], duration: float, *,
+                   pad_s: float | None = None,
+                   step_s: float = config.ARBITER_WINDOW_STEP_S,
+                   max_frames: int = config.ARBITER_EXPAND_MAX_FRAMES,
+                   ) -> list[PlannedFrame]:
+    """Second-pass frames measuring the extent of explicit point hits.
+
+    Sweep/weak hits are point samples padded blind (±ARBITER_SWEEP_PAD_S).
+    When one flips explicit, its neighborhood goes back on the VLM at
+    window density (1s grid): neighbors that also flip chain with the
+    original hit and measure the scene's real extent — a measured segment
+    instead of a symmetric guess. `hit_ts` is the explicit point-hit
+    times, highest-confidence first (budget spends there first). Pure.
+    """
+    if pad_s is None:
+        pad_s = config.ARBITER_SWEEP_PAD_S
+    seg_bounds = [(s["start"], s["end"]) for s in segments]
+
+    def in_segment(t: float) -> bool:
+        return any(a <= t <= b for a, b in seg_bounds)
+
+    cand: dict[float, PlannedFrame] = {}
+    for ht in hit_ts:
+        k = ht - pad_s
+        while k <= ht + pad_s:
+            t = round(min(max(k, 0.0), duration), 3)
+            if t not in judged and t not in cand and not in_segment(t):
+                cand[t] = PlannedFrame(t, PRIO_WINDOW, "expand")
+                if len(cand) >= max_frames:
+                    break
+            k += step_s
+        if len(cand) >= max_frames:
+            break
+    return sorted(cand.values(), key=lambda f: f.t)
 
 
 # --- verdict parsing (pure) ---------------------------------------------------
@@ -240,11 +300,12 @@ def aggregate(planned: list[PlannedFrame], verdicts: list[dict | None],
             "mean_confidence": round(conf, 3),
         })
 
-    # hits outside segments -> new-segment candidates. Sweep hits are POINT
-    # samples (no 1s grid around them): pad them wide; window hits keep the
-    # normal pad (their neighborhood is densely sampled).
+    # hits outside segments -> new-segment candidates. Sweep and weak hits
+    # are POINT samples (no 1s grid around them): pad them wide; window hits
+    # keep the normal pad (their neighborhood is densely sampled).
     hits = sorted((f.t, v["confidence"],
-                   config.ARBITER_SWEEP_PAD_S if f.reason == "sweep"
+                   config.ARBITER_SWEEP_PAD_S
+                   if f.reason in ("sweep", "weak")
                    else smoothing.pad_s)
                   for f, v in zip(planned, verdicts)
                   if v is not None and v["explicit"] and f.seg_idx is None)
@@ -494,6 +555,7 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
                 *, smoothing: SmoothingConfig,
                 model_id: str = config.DEFAULT_ARBITER_MODEL,
                 mode: str = "verify",
+                weak_hits: list[float] = (),
                 workdir: Path | None = None) -> dict:
     """Full sparse arbitration pass. Never raises: returns an error block."""
     t0 = time.monotonic()
@@ -502,7 +564,7 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
                     "rejected_segments": [], "error": None}
     workdir = workdir or Path(config.SCAN_WORKSPACE_DIR) / "arbiter"
     try:
-        planned = plan_frames(duration, segments)
+        planned = plan_frames(duration, segments, weak_hits=list(weak_hits))
         result["planned_frames"] = len(planned)
         if not planned:
             result["wall_time_s"] = round(time.monotonic() - t0, 2)
@@ -510,18 +572,47 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
 
         shutil.rmtree(workdir, ignore_errors=True)  # stale frames from prior run
         files = extract_frames(video_path, [f.t for f in planned], workdir)
-        raw = _judge_with_vlm(files, model_id)
+        model = processor = None
+        try:
+            model, processor = _load_vlm(model_id)
+            raw = _judge_batch(files, model, processor)
+            all_planned = list(planned)
+            verdicts = [parse_verdict(r) for r in raw]
 
-        verdicts = [parse_verdict(r) for r in raw]
-        result["refusals"] = sum(1 for v in verdicts if v is None)
-        result["frames_checked"] = len(verdicts)
-        # per-frame verdicts: trust/debug data for review UIs
-        result["frame_verdicts"] = [
-            {"t": f.t, "reason": f.reason,
-             **(v if v is not None else {"explicit": None})}
-            for f, v in zip(planned, verdicts)]
-        result.update(aggregate(planned, verdicts, duration, smoothing,
-                                segments))
+            # second pass: explicit point hits (sweep/weak) get their
+            # neighborhood measured at window density with the SAME loaded
+            # model — converts a blind ±pad guess into a chained, measured
+            # segment. Highest-confidence hits first; capped. Add-only:
+            # non-explicit neighbors never shrink the hit's own pad.
+            point_hits = sorted(
+                ((f, v) for f, v in zip(planned, verdicts)
+                 if v is not None and v["explicit"] and f.seg_idx is None
+                 and f.reason in ("sweep", "weak")),
+                key=lambda fv: -fv[1]["confidence"])
+            if point_hits:
+                exp = plan_expansion(
+                    [f.t for f, _ in point_hits],
+                    {f.t for f in planned}, segments, duration)
+                if exp:
+                    exp_files = extract_frames(
+                        video_path, [f.t for f in exp], workdir)
+                    raw2 = _judge_batch(exp_files, model, processor)
+                    all_planned += exp
+                    verdicts += [parse_verdict(r) for r in raw2]
+                    result["expansion_frames"] = len(exp)
+
+            result["refusals"] = sum(1 for v in verdicts if v is None)
+            result["frames_checked"] = len(verdicts)
+            # per-frame verdicts: trust/debug data for review UIs
+            result["frame_verdicts"] = [
+                {"t": f.t, "reason": f.reason,
+                 **(v if v is not None else {"explicit": None})}
+                for f, v in zip(all_planned, verdicts)]
+            result.update(aggregate(all_planned, verdicts, duration,
+                                    smoothing, segments))
+        finally:
+            model = processor = None      # drop frame refs BEFORE unload
+            _unload_vlm()
     except Exception as e:  # noqa: BLE001 — arbiter must not fail the scan
         logger.exception("[arbiter] failed")
         result["error"] = f"{type(e).__name__}: {e}"

@@ -6,8 +6,8 @@ Pure-function coverage only — no torch/transformers on the host.
 import pytest
 
 from scanner.arbiter import (PlannedFrame, _cluster_hits, _subtract,
-                             aggregate, parse_verdict, plan_frames,
-                             resolve_vlm_path)
+                             aggregate, parse_verdict, plan_expansion,
+                             plan_frames, resolve_vlm_path)
 from scanner import config
 from scanner.temporal import SmoothingConfig
 
@@ -80,7 +80,8 @@ def test_plan_sweep_keeps_guaranteed_budget_share():
     # second half of the movie as true blind spots for the sweep
     segs = [{"start": 100.0 + i * 55.0, "end": 104.0 + i * 55.0}
             for i in range(20)]                    # 20 segs x 3 = 60 verify
-    planned = plan_frames(3600.0, segs, sweep_every_s=15.0, max_frames=300)
+    planned = plan_frames(3600.0, segs, sweep_every_s=15.0, max_frames=300,
+                          sweep_budget_frac=0.5)
     assert len(planned) <= 300
     sweep = [f for f in planned if f.reason == "sweep"]
     # budget after verify = 240; sweep share = min(240, int(300*0.5)) = 150
@@ -264,3 +265,50 @@ def test_resolve_vlm_path_falls_back_to_id(tmp_path, monkeypatch):
 
     monkeypatch.setattr(config, "VLM_DIR", tmp_path)
     assert resolve_vlm_path("Qwen3-VL-8B-Instruct") == "Qwen3-VL-8B-Instruct"
+
+
+# --- weak detector hits ----------------------------------------------------------
+
+def test_plan_weak_hits_added_and_skipped_inside_segments():
+    segs = [{"start": 100.0, "end": 110.0}]
+    planned = plan_frames(600.0, segs, weak_hits=[50.0, 105.0, 200.0])
+    weak = [f for f in planned if f.reason == "weak"]
+    assert sorted(f.t for f in weak) == [50.0, 200.0]   # 105 sits in a segment
+
+
+def test_plan_weak_capped_without_starving_sweep():
+    planned = plan_frames(600.0, [], weak_hits=[float(i * 5) for i in range(10)],
+                          weak_max=3, max_frames=50)
+    weak = [f for f in planned if f.reason == "weak"]
+    assert len(weak) == 3
+    assert any(f.reason == "sweep" for f in planned)
+
+
+def test_aggregate_pads_weak_hits_like_sweep(monkeypatch):
+    monkeypatch.setattr(config, "ARBITER_SWEEP_PAD_S", 8.0)
+    planned = [PlannedFrame(100.0, 4, "weak"),
+               PlannedFrame(400.0, 1, "sweep"),
+               PlannedFrame(500.0, 2, "window")]
+    ex = {"explicit": True, "labels": [], "confidence": 0.9}
+    out = aggregate(planned, [ex] * 3, 600.0, SmoothingConfig(pad_s=1.5), [])
+    starts = {round(s["start"], 3) for s in out["new_segments"]}
+    assert starts == {92.0, 392.0, 498.5}
+
+
+def test_plan_expansion_grid_and_exclusions():
+    segs = [{"start": 100.0, "end": 110.0}]
+    exp = plan_expansion([200.0], {200.0, 195.0}, segs, 600.0,
+                         pad_s=8.0, step_s=1.0, max_frames=50)
+    ts = [f.t for f in exp]
+    assert ts and all(f.reason == "expand" for f in exp)
+    assert 192.0 in ts and 208.0 in ts      # full +-8 window on a 1s grid
+    assert 200.0 not in ts and 195.0 not in ts           # already judged
+    assert not any(100.0 <= t <= 110.0 for t in ts)      # inside a segment
+
+
+def test_plan_expansion_budget_spent_on_best_hits_first():
+    exp = plan_expansion([400.0, 100.0], set(), [], 600.0,
+                         pad_s=8.0, step_s=1.0, max_frames=10)
+    ts = [f.t for f in exp]
+    assert len(ts) == 10                    # first (highest-conf) hit only
+    assert all(392.0 <= t <= 408.0 for t in ts)

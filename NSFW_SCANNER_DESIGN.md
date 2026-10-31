@@ -302,6 +302,95 @@ detector pass unchanged (~2m20s).
 Residual: sub-15s scenes between grid points can still slip through; the
 next lever is a denser sweep (cap 1200 / every 8s ≈ +2min arbiter).
 
+### CringeMDB ground truth: the 52–58 min blind spot (2026-11-01)
+
+CringeMDB publishes timestamped content scenes for the 1h48m release that
+matches our reference file; 3 of its 4 nudity scenes were spot-verified by
+skin-fraction at the stated frames. Saved as
+`scans/gt_cringemdb_exmachina.json` + `scripts/eval_gt.py` (regression
+metric). The tuned pipeline (640m, sweep15, arbiter apply) covered
+**5.6%** of GT nudity time (13/237s) — all four scenes sit in the dim /
+distant / brief-exposure weak spot.
+
+Isolation probes (raw detector calls on ffmpeg-grabbed frames — no
+pipeline interference; control frame t=5820 fires 0.38–0.71 in every run):
+
+- **NudeNet is blind on the GT frames at any size**: 320n and 640m, TRT
+  fp16 *and* pure-ONNX ORT, full-res 1920×808 *and* 640×270 pre-downsize,
+  raw/CLAHE/gamma — zero trigger boxes on all 12 GT frames. A dense 0.5s
+  sweep of the whole 3131–3499 region produced 4 firing moments in 6 min:
+  3150.5 FEMALE_BREAST 0.51–0.54, 3327/3342.5 FEMALE_GENITALIA 0.25–0.26,
+  3388 BUTTOCKS 0.36–0.44. Luma explains only the bed scene (mean 9);
+  the motionless (66) and sex-scene (81) regions are *brighter* than
+  regions we do detect (finale 45). 640m was already the shipped default
+  — swapping models is not the lever here.
+- **Qwen3-VL is the only model that sees any of it** — but under-calls
+  with the terse prompt: `explicit:false conf 0.0` on 13/14 GT frames,
+  *including the two frames NudeNet fires on* (3150.5, 3388). No
+  refusals; clean JSON every time — a calibration problem, not format.
+- **Prompt fix (probe: 5 variants × 16 frames × 9 clean controls)**:
+  appending a dim/distant-aware paragraph to the terse system prompt
+  ("look carefully at dim regions and distant/partially occluded
+  figures; however small, dim, or brief — set explicit=true") quadrupled
+  GT-frame recall 1/16 → 4/16 at **zero control FPs** (dress-open scene,
+  sub-second flash, dim buttocks). "Search the whole frame" phrasing and
+  a label-free binary variant gained nothing; a 2× center-crop zoom
+  gained nothing (the distant couple stays sub-resolution). Adopted as
+  the new `ARBITER_SYSTEM_PROMPT`.
+- **Scene-level ceiling (dense S1-prompt VLM pass)**: motionless scene
+  3197–3247 — zero flips at 5s spacing, no skin signal, no detector
+  signal: the CringeMDB range over-spans whatever is briefly visible;
+  unreachable and honestly missable. Distant sex scene 3301–3472 —
+  exactly one flippable moment (t=3431, MALE_GENITALIA, conf 0.95) that
+  NudeNet never fired on at any resolution; it sits inside our
+  review-only segment 3427–3435 (ARMPITS/BELLY). Bed flash bounded to
+  3150.50–3150.75 (~0.3–0.5s).
+
+Fix package (this repo, all defaults env-overridable):
+
+1. **S1 dim-aware arbiter prompt** (see `scanner/arbiter.py`).
+2. **Weak-hit routing**: sub-threshold trigger scores
+   (`ARBITER_WEAK_MIN_SCORE` 0.25 → label threshold 0.45) are collected
+   per frame (`Policy.weak_triggers`), clustered to ≤2s-burst peaks
+   (`_cluster_weak`, cap `ARBITER_WEAK_MAX_FRAMES` 120), and planned as
+   top-priority "weak" arbiter frames; a confirmed hit pads like a sweep
+   hit (±8s, add-only). These are the blind region's only detector
+   voice.
+3. **Flash rescue**: `drop_rescue_score` 0.70 → **0.50** — the old line
+   discarded every real sub-second flash (2-sample run at mean ~0.52
+   opened fine, then died at the drop stage).
+4. **Denser sweep**: `ARBITER_SWEEP_EVERY_S` 15 → **10**,
+   `ARBITER_MAX_FRAMES` 700 → **1100**, `ARBITER_SWEEP_BUDGET_FRAC`
+   0.5 → **0.6** (full 10s grid coverage of blind spots; brief scenes
+   like the dress-open still need luck — the sweep is a point sample).
+5. **Orphan-flag routing**: flagged samples (≥ trigger threshold) whose
+   run smoothing discarded — single-frame hits killed by
+   `open_min_consecutive=2`, sub-1s blips below the rescue line — join
+   the weak candidates at score 1.0 (`_orphan_flagged`). A detector-
+   strong single frame is the best blind-spot lead there is; it must
+   never vanish silently.
+6. **Point-hit expansion second pass**: explicit sweep/weak/orphan hits
+   are point samples; `plan_expansion` re-samples their
+   ±`ARBITER_SWEEP_PAD_S` neighborhood at 1s with the same loaded model
+   (cap `ARBITER_EXPAND_MAX_FRAMES` 96, best hits first). Neighbors
+   that also flip chain with the hit — a measured segment instead of a
+   symmetric ±8s guess. Add-only by construction: non-explicit
+   neighbors never shrink the hit's own pad.
+
+v1 A/B (prompt + weak routing + rescue 0.50 + sweep 10s/900, before
+expansion/orphans), same movie and request params as the sweep15
+baseline: GT recall **5.6% → 9.7%** exact (23/237s) and **6.5% →
+19.8%** at ±60s tolerance; dress-open scene 0% → 57%, bed scene covered
+under tolerance, sex scene 7.8% → 8.8%. Regression audit: +95s gained
+vs 45s lost (all losses 0.2–4s boundary slivers of still-covered
+scenes), zero clean-control regions newly flagged, 0 VLM refusals.
+Mechanism attribution from frame verdicts: dress scene = sweep hit at
+3490.0, sex-scene moment = window hit at 3433.3, weak tier judged 15
+frames with 0 flips and 0 FPs (VLM correctly rejects blurry sub-
+threshold distant hits — precision holds). Wall 544s (11.9× realtime)
+with 900 VLM frames judged in 157s.
+
+
 ## 8. Stage C: mask-precision blur render (empirical, 2026-10-31)
 
 Architecture: two passes. **Analysis** decodes only flagged ranges at

@@ -79,6 +79,24 @@ class Policy:
             max_trigger_score=max(triggered.values(), default=0.0),
         )
 
+    def weak_triggers(self, detections: list[Detection],
+                      frame_w: int, frame_h: int,
+                      min_score: float) -> dict[str, float]:
+        """Sub-threshold trigger hits: area-qualified detections whose score
+        sits in [min_score, the label's trigger threshold). These never flag
+        the frame (smoothing never sees them) but are the detector's "almost"
+        signal — valuable exactly where dim/distant bodies live. The arbiter
+        routes their cluster peaks to the VLM for a targeted second look."""
+        weak: dict[str, float] = {}
+        for det in detections:
+            t = self.triggers.get(det.label)
+            if t is None or not min_score <= det.score < t:
+                continue
+            if det.area_fraction(frame_w, frame_h) < self.min_box_area_frac:
+                continue
+            weak[det.label] = max(weak.get(det.label, 0.0), det.score)
+        return weak
+
 
 @dataclass
 class FrameVerdict:

@@ -90,7 +90,10 @@ DEFAULT_SMOOTHING = {
     "close_min_consecutive": 2,    # clean frames to close it
     "bridge_gap_s": 2.0,           # merge on/off flicker shorter than this
     "drop_below_s": 1.0,           # discard blips shorter than this ...
-    "drop_rescue_score": 0.70,     # ... unless mean trigger score above this
+    "drop_rescue_score": 0.50,     # ... unless mean trigger score above this
+                                   # (0.70 kept killing real sub-second
+                                   # flashes — e.g. breast flash @3150.5 in
+                                   # Ex Machina GT, mean ~0.52, dropped)
     "pad_s": 1.5,                  # safety padding on both ends
 }
 
@@ -154,17 +157,33 @@ ARBITER_VERIFY_FRAMES = 3       # per segment, at 20/50/80% of its span
 ARBITER_WINDOW_BEFORE_S = 10.0  # sampled before each segment start
 ARBITER_WINDOW_AFTER_S = 45.0   # sampled after each segment end
 ARBITER_WINDOW_STEP_S = 1.0     # sample spacing inside windows
-ARBITER_SWEEP_EVERY_S = float(os.environ.get("ARBITER_SWEEP_EVERY_S", "15.0"))
-ARBITER_MAX_FRAMES = int(os.environ.get("ARBITER_MAX_FRAMES", "700"))
+ARBITER_SWEEP_EVERY_S = float(os.environ.get("ARBITER_SWEEP_EVERY_S", "10.0"))
+ARBITER_MAX_FRAMES = int(os.environ.get("ARBITER_MAX_FRAMES", "1100"))
 # The sweep is the ONLY global blind-spot coverage and used to lose the
 # budget race entirely (47 segments: verify 141 + windows left ~9 sweep
 # frames for a 108-min movie). It now gets a guaranteed share of the cap;
 # windows refine around known segments with the remainder.
 ARBITER_SWEEP_BUDGET_FRAC = float(
-    os.environ.get("ARBITER_SWEEP_BUDGET_FRAC", "0.5"))
+    os.environ.get("ARBITER_SWEEP_BUDGET_FRAC", "0.6"))
 # A sweep hit is a POINT sample of a scene of unknown extent (window hits
 # sit on a 1s grid, so 1.5s pad finds their edges; sweep hits do not).
 # Pad each sweep hit by this much when clustering into new segments.
 ARBITER_SWEEP_PAD_S = float(os.environ.get("ARBITER_SWEEP_PAD_S", "8.0"))
+# Sub-threshold NudeNet trigger hits (score in [ARBITER_WEAK_MIN_SCORE,
+# the label's trigger threshold)) never reach smoothing, but in the dim/
+# distant blind-spot region they are the detector's only voice (Ex Machina
+# GT: FEMALE_GENITALIA 0.25-0.26 @3327/3342.5, BUTTOCKS 0.36-0.44 @3388 —
+# raw scores below the 0.45 trigger). Cluster peaks go to the VLM as
+# targeted "weak" frames; a confirmed hit becomes a padded add-only
+# segment exactly like a sweep hit.
+ARBITER_WEAK_MIN_SCORE = float(
+    os.environ.get("ARBITER_WEAK_MIN_SCORE", "0.25"))
+ARBITER_WEAK_MAX_FRAMES = int(
+    os.environ.get("ARBITER_WEAK_MAX_FRAMES", "120"))
+# Second pass: measure the extent of explicit point hits (sweep/weak) by
+# re-sampling their ±ARBITER_SWEEP_PAD_S neighborhood at window density.
+# Capped; highest-confidence hits expand first.
+ARBITER_EXPAND_MAX_FRAMES = int(
+    os.environ.get("ARBITER_EXPAND_MAX_FRAMES", "96"))
 ARBITER_MODES = ("verify", "apply")  # verify: annotate; apply: also merge/remove
 ARBITER_FRAME_W = 1024          # extraction width for VLM frames

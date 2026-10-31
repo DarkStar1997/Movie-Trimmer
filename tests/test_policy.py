@@ -79,3 +79,20 @@ def test_unknown_override_key_rejected():
 def test_bad_threshold_range_rejected():
     with pytest.raises(ValueError):
         Policy(triggers={"ANUS_EXPOSED": 1.5})
+
+
+def test_weak_triggers_band_and_area():
+    """weak_triggers: score in [min_score, trigger threshold), area-qualified,
+    trigger labels only."""
+    p = Policy()
+    dets = [
+        det("FEMALE_BREAST_EXPOSED", 0.30),           # in band -> weak
+        det("FEMALE_BREAST_EXPOSED", 0.50),           # >= threshold -> not weak
+        det("FEMALE_GENITALIA_EXPOSED", 0.20),        # below band -> not weak
+        det("BUTTOCKS_EXPOSED", 0.40, w=20, h=20),    # in band, tiny box -> out
+        det("BELLY_EXPOSED", 0.80),                   # review label -> out
+    ]
+    assert p.weak_triggers(dets, W, H, 0.25) == {"FEMALE_BREAST_EXPOSED": 0.30}
+    # boundary: exactly min_score is in, exactly threshold is not
+    dets = [det("ANUS_EXPOSED", 0.25), det("ANUS_EXPOSED", 0.45)]
+    assert p.weak_triggers(dets, W, H, 0.25) == {"ANUS_EXPOSED": 0.25}

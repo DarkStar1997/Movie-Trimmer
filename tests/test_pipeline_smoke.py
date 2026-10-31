@@ -89,3 +89,30 @@ def test_open_decoder_double_enter_single_ffmpeg():
         while alive(first_pid) and time.monotonic() < deadline:
             time.sleep(0.1)
         assert not alive(first_pid)
+
+
+def test_cluster_weak_bursts_to_peaks():
+    from scanner.pipeline import _cluster_weak
+    raw = [(100.0, 0.30, "FEMALE_GENITALIA_EXPOSED"),
+           (100.25, 0.26, "FEMALE_GENITALIA_EXPOSED"),   # same burst
+           (101.9, 0.35, "FEMALE_GENITALIA_EXPOSED"),    # still <=2s gap
+           (110.0, 0.28, "BUTTOCKS_EXPOSED"),            # new burst
+           (400.0, 0.44, "BUTTOCKS_EXPOSED")]
+    peaks = _cluster_weak(raw, 10)
+    assert [(round(t, 2), s, l) for t, s, l in peaks] == [
+        (101.9, 0.35, "FEMALE_GENITALIA_EXPOSED"),
+        (110.0, 0.28, "BUTTOCKS_EXPOSED"),
+        (400.0, 0.44, "BUTTOCKS_EXPOSED")]
+    # cap by striding, not truncating
+    many = [(float(i), 0.3, "BUTTOCKS_EXPOSED") for i in range(0, 100, 5)]
+    assert len(_cluster_weak(many, 4)) == 4
+    assert _cluster_weak(many, 4)[0][0] == 0.0
+
+
+def test_orphan_flagged_excludes_segment_covered():
+    from scanner.pipeline import _orphan_flagged
+    ts = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5]
+    flags = [False, True, True, False, True, False]
+    segs = [{"start": 0.3, "end": 1.2}]      # padded over the first run
+    assert _orphan_flagged(ts, flags, segs) == [2.0]
+    assert _orphan_flagged(ts, flags, []) == [0.5, 1.0, 2.0]

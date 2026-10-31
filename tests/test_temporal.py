@@ -34,9 +34,20 @@ def test_single_sample_blip_never_opens():
 
 def test_short_low_confidence_run_dropped():
     # 2 flagged samples = 0.5s < drop_below_s(1.0), low score -> dropped
+    # (rescue line is 0.50 since the flash-recall fix: mean >= 0.50 survives)
     flags = flags_from_runs(40, [(10, 11)])
-    scores = [0.5 if f else 0.0 for f in flags]
+    scores = [0.45 if f else 0.0 for f in flags]
     assert smooth_segments(flags, ts_of(40), scores, DUR) == []
+
+
+def test_short_mid_confidence_flash_rescued():
+    # Ex Machina GT regression: breast flash @3150.5 fires ~0.52 for <0.5s —
+    # the old 0.70 rescue line dropped it; 0.50 keeps real detector-strong
+    # flashes while still discarding sub-0.5 noise blips
+    flags = flags_from_runs(40, [(10, 11)])
+    scores = [0.52 if f else 0.0 for f in flags]
+    segs = smooth_segments(flags, ts_of(40), scores, DUR)
+    assert len(segs) == 1
 
 
 def test_short_high_confidence_run_rescued():

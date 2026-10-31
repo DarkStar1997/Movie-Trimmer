@@ -83,6 +83,7 @@ def run_scan(
     rev_labels: list[dict] = []
     bridge_only: list[bool] = []
     label_stats: Counter = Counter()
+    weak_raw: list[tuple[float, float, str]] = []   # (t, score, label)
 
     # stage A: tracker over person clusters at the sample cadence
     bridge = TrackBridge(
@@ -130,6 +131,11 @@ def run_scan(
             rev_scores.append(max(verdict.review_labels.values(), default=0.0))
             rev_labels.append(dict(verdict.review_labels))
             ts.append(t)
+            weak = policy.weak_triggers(dets, decoder.width, decoder.height,
+                                         config.ARBITER_WEAK_MIN_SCORE)
+            if weak:
+                top_label = max(weak, key=weak.get)
+                weak_raw.append((t, weak[top_label], top_label))
             for det in dets:
                 label_stats[det.label] += 1
 
@@ -172,11 +178,20 @@ def run_scan(
     timeline = bin_timeline(trig_flags, ts, duration)
 
     # stage B: sparse VLM arbitration (opt-in; failure never fails the scan)
+    # weak hits: cluster sub-threshold trigger bursts (<=2s gap) to their
+    # peak sample, capped by striding — each peak is one targeted VLM frame.
+    # Orphaned flagged samples (>= threshold but smoothing dropped the run)
+    # join them at score 1.0: a detector-strong single frame is the best
+    # blind-spot lead there is (Ex Machina GT: the 0.3s flash at 6fps).
+    weak_raw += [(t, 1.0, "ORPHAN_TRIGGER")
+                 for t in _orphan_flagged(ts, trig_flags, segments)]
+    weak_peaks = _cluster_weak(weak_raw, config.ARBITER_WEAK_MAX_FRAMES)
     arbiter_block: Optional[dict] = None
     if arbiter:
         arbiter_block = run_arbiter(
             video_path, duration, segments, smoothing=smoothing,
-            model_id=arbiter_model, mode=arbiter_mode)
+            model_id=arbiter_model, mode=arbiter_mode,
+            weak_hits=[t for t, _, _ in weak_peaks])
         # apply-mode is ADD-ONLY: VLM-found blind-spot segments merge in,
         # but detector-flagged segments are never removed on VLM
         # non-confirmation — measured Qwen3-VL behavior on dim scenes is
@@ -200,6 +215,9 @@ def run_scan(
         "review_segments": review_segments,
         "timeline": timeline,
         "label_stats": dict(label_stats),
+        "weak_trigger_hits": [{"t": round(t, 3), "score": round(s, 3),
+                               "label": lab}
+                              for t, s, lab in weak_peaks],
         "policy": {"triggers": policy.triggers, "review": policy.review,
                    "min_box_area_frac": policy.min_box_area_frac},
         "smoothing": {"open_min_consecutive": smoothing.open_min_consecutive,
@@ -220,6 +238,33 @@ def run_scan(
         "wall_time_s": round(wall, 2),
         "infer_time_s": round(infer_s, 2),
     }
+
+
+def _orphan_flagged(ts: list[float], flags: list[bool],
+                    segments: list[dict]) -> list[float]:
+    """Flagged sample times that no final segment covers — the detector
+    fired at/above trigger threshold there, but smoothing discarded the
+    run (single-frame hits, sub-1s blips below the rescue line). Pure."""
+    ivs = [(s["start"], s["end"]) for s in segments]
+    return [t for t, f in zip(ts, flags)
+            if f and not any(a <= t <= b for a, b in ivs)]
+
+
+def _cluster_weak(raw: list[tuple[float, float, str]],
+                  max_keep: int) -> list[tuple[float, float, str]]:
+    """(t, score, label) samples -> one peak per <=2s burst, thinned to
+    max_keep. Pure; sorted output."""
+    clusters: list[list[tuple[float, float, str]]] = []
+    for t, s, lab in sorted(raw):
+        if clusters and t - clusters[-1][-1][0] <= 2.0:
+            clusters[-1].append((t, s, lab))
+        else:
+            clusters.append([(t, s, lab)])
+    peaks = [max(c, key=lambda x: x[1]) for c in clusters]
+    if len(peaks) > max_keep > 0:
+        step = len(peaks) / max_keep
+        peaks = [peaks[int(i * step)] for i in range(max_keep)]
+    return peaks
 
 
 def _apply_arbiter(segments: list[dict], arb: dict) -> list[dict]:
