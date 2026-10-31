@@ -108,6 +108,11 @@ class FFmpegPipeDecoder:
         ]
 
     def __enter__(self) -> "FFmpegPipeDecoder":
+        # idempotent: open_decoder() already entered; a second enter (the
+        # caller's `with`) must not spawn a second ffmpeg — the first would
+        # be orphaned (self._proc replaced) and leak ~0.5 GiB VRAM per scan
+        if self._proc is not None:
+            return self
         try:
             self._start()
         except RuntimeError:

@@ -40,3 +40,52 @@ def test_run_scan_end_to_end():
     assert res["tracking"]["enabled"] is True
     assert res["tracking"]["bridged_samples"] == 0
     assert res["arbiter"] is None
+
+
+def test_open_decoder_double_enter_single_ffmpeg():
+    """open_decoder() enters; the caller's `with` enters again. The second
+    enter must not spawn a second ffmpeg — the first would be orphaned
+    (self._proc replaced, never killed) and leak ~0.5 GiB VRAM per scan."""
+    import os
+    import shutil
+    import time
+
+    import cv2
+    import numpy as np
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not present")
+
+    with tempfile.TemporaryDirectory() as td:
+        clip = f"{td}/smoke.mp4"
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24",
+             "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", clip],
+            check=True)
+        from scanner.decode import FFmpegPipeDecoder
+
+        dec = FFmpegPipeDecoder(clip, fps=4.0, width=320, height=180,
+                                use_hwaccel=False)
+        dec.__enter__()
+        first_pid = dec._proc.pid
+        try:
+            with dec:                      # the double-enter under test
+                assert dec._proc.pid == first_pid
+                for i, _ in enumerate(dec.frames()):
+                    if i >= 4:
+                        break
+        finally:
+            dec.close()
+        assert dec._proc is None
+        # the exact pid is gone (close reaped it)
+        def alive(pid):
+            try:
+                os.kill(pid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+        deadline = time.monotonic() + 5
+        while alive(first_pid) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not alive(first_pid)
