@@ -1,0 +1,8 @@
+# scanner.Dockerfile-specific ignore: weights come from the weight images,
+# so keep the 17GB VLM staging dir and local movie files out of this
+# build's context. (nudenet-weights / rfdetr-seg-weights / qwen3vl-weights
+# Dockerfiles DO need models/ in their context — they use the root
+# .dockerignore instead.)
+models/
+*.mp4
+*.mkv

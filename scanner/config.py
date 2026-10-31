@@ -1,0 +1,127 @@
+"""Scanner configuration: paths, models, defaults.
+
+Paths are env-overridable so the Docker image (models baked into /opt/models,
+bind-mounted engine cache) and a host checkout share one code path.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+# --- Paths -----------------------------------------------------------------
+# Baked-in weights (container: /opt/models, host checkout: ./models)
+MODEL_DIR = Path(os.environ.get("MODEL_DIR", "models"))
+# Baked-in VLM for the arbiter stage (container: /opt/vlm, host: ./models).
+# Weights ship in the scanner image — nothing downloads at runtime
+# (HF_HUB_OFFLINE=1 in the container enforces it).
+VLM_DIR = Path(os.environ.get("VLM_DIR", "models"))
+# TRT engine cache — bind-mount this in the container (see scanner.Dockerfile).
+TRT_CACHE_DIR = Path(os.environ.get("TRT_CACHE_DIR", "trt_cache"))
+# Uploaded scan inputs (host or container-local scratch)
+SCAN_WORKSPACE_DIR = Path(os.environ.get("SCAN_WORKSPACE_DIR", "scan_workspaces"))
+
+# --- Models ----------------------------------------------------------------
+# name -> (onnx filename stem, inference resolution). Resolution must match the
+# model the weights were trained at (NudeNet v3.4: 320n@320, 640m@640).
+MODELS: dict[str, tuple[str, int]] = {
+    "320n": ("nudenet_320n_v1.onnx", 320),
+    "640m": ("nudenet_640m_v1.onnx", 640),
+}
+DEFAULT_MODEL = "640m"
+
+# Decode resolution fed to the detector. Wider than tall: the detector
+# letterbox-pads to square itself (reference NudeNet behaviour), so a 16:9
+# frame arrives as full width + black bottom pad. Full-width detail is what
+# matters; height padding costs the model nothing we can recover anyway.
+DECODE_WIDTH = 640
+DECODE_HEIGHT = 360
+
+# --- Scan defaults ----------------------------------------------------------
+DEFAULT_SAMPLE_FPS = 4.0
+DEFAULT_BATCH_SIZE = 16
+MAX_CONCURRENT_SCANS = 1
+
+# --- NudeNet label taxonomy (EXACT order of ONNX output channels 4..21) -----
+NUDENET_LABELS: list[str] = [
+    "FEMALE_GENITALIA_COVERED",   # 0
+    "FACE_FEMALE",                # 1
+    "BUTTOCKS_EXPOSED",           # 2
+    "FEMALE_BREAST_EXPOSED",      # 3
+    "FEMALE_GENITALIA_EXPOSED",   # 4
+    "MALE_BREAST_EXPOSED",        # 5
+    "ANUS_EXPOSED",               # 6
+    "FEET_EXPOSED",               # 7
+    "BELLY_COVERED",              # 8
+    "FEET_COVERED",               # 9
+    "ARMPITS_COVERED",            # 10
+    "ARMPITS_EXPOSED",            # 11
+    "FACE_MALE",                  # 12
+    "BELLY_EXPOSED",              # 13
+    "MALE_GENITALIA_EXPOSED",     # 14
+    "ANUS_COVERED",               # 15
+    "FEMALE_BREAST_COVERED",      # 16
+    "BUTTOCKS_COVERED",           # 17
+]
+
+# --- Default label policy ----------------------------------------------------
+# triggers  -> any qualifying detection marks the frame NSFW (auto-cut segment)
+# review    -> flagged separately for human review, never auto-cut
+DEFAULT_TRIGGER_LABELS: dict[str, float] = {
+    "FEMALE_GENITALIA_EXPOSED": 0.45,
+    "MALE_GENITALIA_EXPOSED": 0.45,
+    "ANUS_EXPOSED": 0.45,
+    "FEMALE_BREAST_EXPOSED": 0.45,
+    "BUTTOCKS_EXPOSED": 0.45,
+}
+DEFAULT_REVIEW_LABELS: dict[str, float] = {
+    "BELLY_EXPOSED": 0.60,
+    "ARMPITS_EXPOSED": 0.60,
+    "FEET_EXPOSED": 0.60,
+}
+# Ignore boxes smaller than this fraction of frame area (posters, background
+# TVs, tiny far-away figures).
+DEFAULT_MIN_BOX_AREA_FRAC = 0.005
+
+# --- Temporal smoothing defaults ---------------------------------------------
+# (see temporal.SmoothingConfig docstring for semantics)
+DEFAULT_SMOOTHING = {
+    "open_min_consecutive": 2,     # sampled frames to open a segment
+    "close_min_consecutive": 2,    # clean frames to close it
+    "bridge_gap_s": 2.0,           # merge on/off flicker shorter than this
+    "drop_below_s": 1.0,           # discard blips shorter than this ...
+    "drop_rescue_score": 0.70,     # ... unless mean trigger score above this
+    "pad_s": 1.5,                  # safety padding on both ends
+}
+
+# --- Detector post-processing (parity with nudenet 3.4.2 reference) ----------
+DETECT_SCORE_THRESHOLD = 0.2   # candidate collection threshold
+NMS_SCORE_THRESHOLD = 0.25    # NMS entry threshold
+NMS_IOU_THRESHOLD = 0.45     # class-agnostic, as in the reference
+
+# --- Stage A: tracking (explicit-hold bridging) --------------------------------
+# ByteTrack-style person-cluster tracking (scanner/tracking.py). Deterministic,
+# no extra model: keeps a scene flagged while its person track (which last
+# carried an explicit label within TRACK_EXPLICIT_HOLD_S) stays alive through
+# sub-threshold flicker. A *_COVERED counterpart clears the hold (re-clothed).
+DEFAULT_TRACK = True
+TRACK_EXPLICIT_HOLD_S = 8.0
+TRACK_REFRESH_FLOOR = 0.15    # sub-trigger explicit score that still refreshes
+TRACK_MAX_LOST_SAMPLES = 3    # coasting samples (~0.75s @4fps) before retirement
+
+# --- Stage B: VLM arbiter (sparse Qwen3-VL pass) -------------------------------
+# Never every frame: verify N frames per final segment, sample windows around
+# segments (flicker gaps / short continuations), plus a coarse global sweep for
+# true blind spots — capped at ARBITER_MAX_FRAMES per movie.
+DEFAULT_ARBITER = False
+# Bare name resolved against VLM_DIR first (baked weights); an HF repo id
+# also works on a networked host (the container runs offline by design).
+DEFAULT_ARBITER_MODEL = "Qwen3-VL-8B-Instruct"
+ARBITER_VERIFY_FRAMES = 3       # per segment, at 20/50/80% of its span
+ARBITER_WINDOW_BEFORE_S = 10.0  # sampled before each segment start
+ARBITER_WINDOW_AFTER_S = 45.0   # sampled after each segment end
+ARBITER_WINDOW_STEP_S = 1.0     # sample spacing inside windows
+ARBITER_SWEEP_EVERY_S = 60.0    # global blind-spot sweep spacing
+ARBITER_MAX_FRAMES = 250        # hard cap per movie
+ARBITER_MODES = ("verify", "apply")  # verify: annotate; apply: also merge/remove
+ARBITER_FRAME_W = 1024          # extraction width for VLM frames

@@ -208,3 +208,23 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Scanner artifacts
+models/
+trt_cache/
+scan_workspaces/
+scans/
+
+# Movie files — never commit video content (test clips, sources, outputs)
+*.mp4
+*.m4v
+*.mkv
+*.avi
+*.mov
+*.webm
+*.wmv
+*.flv
+*.mpg
+*.mpeg
+*.m2ts
+*.ts
