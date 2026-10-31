@@ -312,3 +312,22 @@ def test_plan_expansion_budget_spent_on_best_hits_first():
     ts = [f.t for f in exp]
     assert len(ts) == 10                    # first (highest-conf) hit only
     assert all(392.0 <= t <= 408.0 for t in ts)
+
+
+def test_plan_companions_tiered_after_weak():
+    segs = []
+    planned = plan_frames(600.0, segs, weak_hits=[100.0],
+                          companion_hits=[99.5, 100.5],
+                          max_frames=60, weak_max=10)
+    reasons = {f.reason for f in planned}
+    assert {"weak", "companion"} <= reasons
+    ts = [f.t for f in planned if f.reason == "companion"]
+    assert 99.5 in ts and 100.5 in ts
+
+
+def test_aggregate_pads_companions_like_sweep(monkeypatch):
+    monkeypatch.setattr(config, "ARBITER_SWEEP_PAD_S", 8.0)
+    planned = [PlannedFrame(200.0, 4, "companion")]
+    ex = {"explicit": True, "labels": [], "confidence": 0.9}
+    out = aggregate(planned, [ex], 600.0, SmoothingConfig(pad_s=1.5), [])
+    assert [(s["start"], s["end"]) for s in out["new_segments"]] == [(192.0, 208.0)]

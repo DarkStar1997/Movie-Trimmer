@@ -368,7 +368,13 @@ Fix package (this repo, all defaults env-overridable):
    `open_min_consecutive=2`, sub-1s blips below the rescue line — join
    the weak candidates at score 1.0 (`_orphan_flagged`). A detector-
    strong single frame is the best blind-spot lead there is; it must
-   never vanish silently.
+   never vanish silently. Orphan samples also get **±0.5s companion
+   frames** judged: a sub-second flash is wider than one sampling
+   phase, and the orphan sample can land at the edge of the
+   visually-explicit window (measured: the flash's orphan landed 0.17s
+   before the VLM's window; companions at ±0.5s cover that class).
+   Weak-band peaks (0.25–0.45) get no companions — measured VLM-
+   rejected 15/15, not worth the budget.
 6. **Point-hit expansion second pass**: explicit sweep/weak/orphan hits
    are point samples; `plan_expansion` re-samples their
    ±`ARBITER_SWEEP_PAD_S` neighborhood at 1s with the same loaded model
@@ -389,6 +395,27 @@ Mechanism attribution from frame verdicts: dress scene = sweep hit at
 frames with 0 flips and 0 FPs (VLM correctly rejects blurry sub-
 threshold distant hits — precision holds). Wall 544s (11.9× realtime)
 with 900 VLM frames judged in 157s.
+
+Final A/B (v3: + orphan routing, full 10s grid at 1100 frames; v4: +
+orphan companions): **GT recall 5.6% → 15.0%** exact (36/237s),
+**6.5% → 25.1%** at ±60s tolerance; sex scene 7.8% → 15.2%, dress-open
+0% → 68%, bed scene covered under tolerance. Regression audit across
+all runs: no clean-control region ever newly flagged, losses are
+0.2–8s boundary slivers of still-covered scenes, 0 VLM refusals,
+47 segments / 502s flagged (baseline 50 / 394s).
+
+### The remaining gap is model-bound (evidence)
+
+A 1s-density VLM pass (99 frames) over the two big uncovered GT ranges
+found **zero** explicit moments: motionless 3197–3247 (51 frames) and
+sex-scene tail 3435–3472 (38 frames) are invisible to Qwen3-VL at
+maximum practical density — matching the NudeNet dense 0.5s sweep
+(zero boxes) and the skin-fraction calibration (no separation; the
+teal/orange grade defeats YCrCb rules). CringeMDB ranges span whole
+*scenes*; the actually-visible nudity inside them is concentrated in
+the slivers every model does see (now covered). Raising coverage
+further needs a differently-biased model (e.g. ShieldGemma-2 second
+vote), not more mechanisms on this stack.
 
 
 ## 8. Stage C: mask-precision blur render (empirical, 2026-10-31)

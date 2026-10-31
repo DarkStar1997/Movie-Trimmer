@@ -107,6 +107,7 @@ def plan_frames(duration: float, segments: list[dict], *,
                 sweep_budget_frac: float = config.ARBITER_SWEEP_BUDGET_FRAC,
                 weak_hits: list[float] = (),
                 weak_max: int = config.ARBITER_WEAK_MAX_FRAMES,
+                companion_hits: list[float] = (),
                 ) -> list[PlannedFrame]:
     """Curate the sparse VLM frame list, capped by striding not truncating."""
     if duration <= 0:
@@ -133,6 +134,14 @@ def plan_frames(duration: float, segments: list[dict], *,
     for t in weak_hits:
         if not in_segment(t):
             add(t, PRIO_WEAK, "weak")
+
+    # 0b) orphan companions: orphan-flagged samples (detector >= trigger
+    #     threshold, run discarded by smoothing) get their +-0.5s
+    #     neighbors judged too — a sub-second flash is wider than one
+    #     sampling phase, and the orphan sample can land at its edge
+    for t in companion_hits:
+        if not in_segment(t):
+            add(t, PRIO_WEAK, "companion")
 
     # 1) verification frames inside segments (keep out of the 0.5s edges)
     fracs = [0.2, 0.5, 0.8][:verify_frames] or [0.5]
@@ -181,6 +190,9 @@ def plan_frames(duration: float, segments: list[dict], *,
         return [items[int(i * step)] for i in range(budget)]
 
     kept = thin(by_reason.get("weak", []), min(weak_max, max_frames))
+    kept += thin([f for f in by_reason.get("companion", [])
+                  if f.t not in {k.t for k in kept}],
+                 min(2 * weak_max, max_frames - len(kept)))
     kept += thin(by_reason.get("verify", []), max_frames - len(kept))
     budget = max_frames - len(kept)
     # sweep BEFORE windows: it is the only global coverage and loses the
@@ -305,7 +317,7 @@ def aggregate(planned: list[PlannedFrame], verdicts: list[dict | None],
     # keep the normal pad (their neighborhood is densely sampled).
     hits = sorted((f.t, v["confidence"],
                    config.ARBITER_SWEEP_PAD_S
-                   if f.reason in ("sweep", "weak")
+                   if f.reason in ("sweep", "weak", "companion")
                    else smoothing.pad_s)
                   for f, v in zip(planned, verdicts)
                   if v is not None and v["explicit"] and f.seg_idx is None)
@@ -556,6 +568,7 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
                 model_id: str = config.DEFAULT_ARBITER_MODEL,
                 mode: str = "verify",
                 weak_hits: list[float] = (),
+                companion_hits: list[float] = (),
                 workdir: Path | None = None) -> dict:
     """Full sparse arbitration pass. Never raises: returns an error block."""
     t0 = time.monotonic()
@@ -564,7 +577,8 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
                     "rejected_segments": [], "error": None}
     workdir = workdir or Path(config.SCAN_WORKSPACE_DIR) / "arbiter"
     try:
-        planned = plan_frames(duration, segments, weak_hits=list(weak_hits))
+        planned = plan_frames(duration, segments, weak_hits=list(weak_hits),
+                              companion_hits=list(companion_hits))
         result["planned_frames"] = len(planned)
         if not planned:
             result["wall_time_s"] = round(time.monotonic() - t0, 2)
@@ -587,7 +601,7 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
             point_hits = sorted(
                 ((f, v) for f, v in zip(planned, verdicts)
                  if v is not None and v["explicit"] and f.seg_idx is None
-                 and f.reason in ("sweep", "weak")),
+                 and f.reason in ("sweep", "weak", "companion")),
                 key=lambda fv: -fv[1]["confidence"])
             if point_hits:
                 exp = plan_expansion(

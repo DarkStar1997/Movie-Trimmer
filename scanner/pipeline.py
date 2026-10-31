@@ -185,13 +185,22 @@ def run_scan(
     # blind-spot lead there is (Ex Machina GT: the 0.3s flash at 6fps).
     weak_raw += [(t, 1.0, "ORPHAN_TRIGGER")
                  for t in _orphan_flagged(ts, trig_flags, segments)]
+    orphans = [t for t, s, lab in weak_raw if lab == "ORPHAN_TRIGGER"]
     weak_peaks = _cluster_weak(weak_raw, config.ARBITER_WEAK_MAX_FRAMES)
+    # +-0.5s companions for orphan samples only: weak-band peaks are
+    # VLM-rejected as a rule (measured 15/15), orphans are detector-
+    # confirmed sub-second flashes whose sample can land at the edge of
+    # the visually-explicit window
+    companions = sorted({round(min(max(t + d, 0.0), duration), 3)
+                         for t in orphans for d in (-0.5, 0.5)
+                         if 0.0 <= t + d <= duration})
     arbiter_block: Optional[dict] = None
     if arbiter:
         arbiter_block = run_arbiter(
             video_path, duration, segments, smoothing=smoothing,
             model_id=arbiter_model, mode=arbiter_mode,
-            weak_hits=[t for t, _, _ in weak_peaks])
+            weak_hits=[t for t, _, _ in weak_peaks],
+            companion_hits=companions)
         # apply-mode is ADD-ONLY: VLM-found blind-spot segments merge in,
         # but detector-flagged segments are never removed on VLM
         # non-confirmation — measured Qwen3-VL behavior on dim scenes is
