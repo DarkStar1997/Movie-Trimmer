@@ -60,10 +60,17 @@ curl -X POST http://localhost:8081/scan \
 
 # stage A tracking (default on): person-cluster tracker bridges sub-threshold
 # flicker inside a scene — add -F track=false to disable.
-# stage B arbiter (opt-in): sparse Qwen3-VL verification + blind-gap sampling
+# stage B arbiter (opt-in): sparse Qwen3-VL-8B pass — 3 verify frames per
+# segment, a 15s global sweep (guaranteed 50% of the 700-frame budget, so
+# far-from-any-segment scenes still get sampled), and 1s-grid windows around
+# segments. arbiter_mode=apply merges VLM-found segments in (add-only);
+# verify reports verdicts without changing segments. Knobs (env): 
+# ARBITER_SWEEP_EVERY_S, ARBITER_MAX_FRAMES, ARBITER_SWEEP_BUDGET_FRAC,
+# ARBITER_SWEEP_PAD_S (sweep hits pad wide — point samples of unknown scenes).
+# Measured: 108-min film scans in ~8 min total (13x realtime), 0 refusals.
 curl -X POST http://localhost:8081/scan \
   -F video_path=/movies/film.mkv \
-  -F arbiter=true -F arbiter_mode=verify
+  -F arbiter=true -F arbiter_mode=apply
 
 # stage C blur: mask-precision pixelation instead of cutting. Segments from
 # a scan_id (its policy is reused), explicit [[start, end]] pairs, or full

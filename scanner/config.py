@@ -154,7 +154,17 @@ ARBITER_VERIFY_FRAMES = 3       # per segment, at 20/50/80% of its span
 ARBITER_WINDOW_BEFORE_S = 10.0  # sampled before each segment start
 ARBITER_WINDOW_AFTER_S = 45.0   # sampled after each segment end
 ARBITER_WINDOW_STEP_S = 1.0     # sample spacing inside windows
-ARBITER_SWEEP_EVERY_S = 60.0    # global blind-spot sweep spacing
-ARBITER_MAX_FRAMES = 250        # hard cap per movie
+ARBITER_SWEEP_EVERY_S = float(os.environ.get("ARBITER_SWEEP_EVERY_S", "15.0"))
+ARBITER_MAX_FRAMES = int(os.environ.get("ARBITER_MAX_FRAMES", "700"))
+# The sweep is the ONLY global blind-spot coverage and used to lose the
+# budget race entirely (47 segments: verify 141 + windows left ~9 sweep
+# frames for a 108-min movie). It now gets a guaranteed share of the cap;
+# windows refine around known segments with the remainder.
+ARBITER_SWEEP_BUDGET_FRAC = float(
+    os.environ.get("ARBITER_SWEEP_BUDGET_FRAC", "0.5"))
+# A sweep hit is a POINT sample of a scene of unknown extent (window hits
+# sit on a 1s grid, so 1.5s pad finds their edges; sweep hits do not).
+# Pad each sweep hit by this much when clustering into new segments.
+ARBITER_SWEEP_PAD_S = float(os.environ.get("ARBITER_SWEEP_PAD_S", "8.0"))
 ARBITER_MODES = ("verify", "apply")  # verify: annotate; apply: also merge/remove
 ARBITER_FRAME_W = 1024          # extraction width for VLM frames

@@ -3,8 +3,12 @@
 Pure-function coverage only — no torch/transformers on the host.
 """
 
-from scanner.arbiter import (PlannedFrame, _subtract, aggregate,
-                             parse_verdict, plan_frames, resolve_vlm_path)
+import pytest
+
+from scanner.arbiter import (PlannedFrame, _cluster_hits, _subtract,
+                             aggregate, parse_verdict, plan_frames,
+                             resolve_vlm_path)
+from scanner import config
 from scanner.temporal import SmoothingConfig
 
 
@@ -64,6 +68,32 @@ def test_plan_respects_cap_by_thinning_not_truncating():
 
 def test_plan_empty_duration():
     assert plan_frames(0.0, []) == []
+
+
+def test_plan_sweep_keeps_guaranteed_budget_share():
+    """Regression: with many segments the old verify->windows->sweep order
+    starved the sweep to single digits for the WHOLE movie (47 segments on
+    a 108-min film left ~9 sweep frames). The sweep is the only global
+    blind-spot coverage and now gets its share before windows refine
+    already-flagged neighborhoods."""
+    # sparse segments: windows cover only their 45s afterglow, leaving the
+    # second half of the movie as true blind spots for the sweep
+    segs = [{"start": 100.0 + i * 55.0, "end": 104.0 + i * 55.0}
+            for i in range(20)]                    # 20 segs x 3 = 60 verify
+    planned = plan_frames(3600.0, segs, sweep_every_s=15.0, max_frames=300)
+    assert len(planned) <= 300
+    sweep = [f for f in planned if f.reason == "sweep"]
+    # budget after verify = 240; sweep share = min(240, int(300*0.5)) = 150
+    assert len(sweep) == 150
+
+
+def test_plan_sweep_spans_whole_movie_when_capped():
+    """A thinned sweep must still stride the full duration, not truncate."""
+    segs = [{"start": 100.0 + i * 55.0, "end": 104.0 + i * 55.0}
+            for i in range(20)]
+    planned = plan_frames(3600.0, segs, sweep_every_s=15.0, max_frames=300)
+    ts = [f.t for f in planned if f.reason == "sweep"]
+    assert ts[0] <= 15.0 and max(ts) > 3400.0
 
 
 # --- verdict parsing ---------------------------------------------------------------
@@ -177,8 +207,32 @@ def test_aggregate_distant_hits_never_chain():
     verdicts = [{"explicit": True, "labels": [], "confidence": 0.9}] * 3
     out = aggregate(planned, verdicts, 600.0, SM, segs)
     assert len(out["new_segments"]) == 3
-    for ns in out["new_segments"]:
-        assert ns["end"] - ns["start"] < 10.0
+
+
+def test_aggregate_sweep_hit_pads_wide():
+    """A sweep hit is a POINT sample of a scene of unknown extent — its new
+    segment must be padded by ARBITER_SWEEP_PAD_S, much wider than a window
+    hit whose neighborhood was sampled on a 1s grid."""
+    planned = [_pf(100.0, "sweep"), _pf(400.0)]      # window frame at 400
+    verdicts = [{"explicit": True, "labels": [], "confidence": 0.9}] * 2
+    out = aggregate(planned, verdicts, 600.0, SM, [])
+    ns = sorted(out["new_segments"], key=lambda s: s["start"])
+    pad = config.ARBITER_SWEEP_PAD_S
+    assert abs(ns[0]["start"] - (100.0 - pad)) < 0.01
+    assert abs(ns[0]["end"] - (100.0 + pad)) < 0.01
+    assert (ns[0]["end"] - ns[0]["start"]) > \
+        (ns[1]["end"] - ns[1]["start"])               # sweep >> window pad
+
+
+def test_cluster_hits_chains_overlapping_sweep_pads():
+    """Sweep samples 15s apart describe ONE ongoing scene when their wide
+    pads overlap (gap after padding <= chain_gap); window hits 15s apart
+    with narrow pads stay two segments."""
+    segs = _cluster_hits([(100.0, 0.9, 8.0), (115.0, 0.8, 8.0)], 6.0)
+    assert len(segs) == 1
+    assert (segs[0][0], segs[0][1]) == (92.0, 123.0)
+    assert segs[0][2] == pytest.approx(0.85)
+    assert len(_cluster_hits([(100.0, 0.9, 1.5), (115.0, 0.8, 1.5)], 6.0)) == 2
 
 
 def test_subtract():

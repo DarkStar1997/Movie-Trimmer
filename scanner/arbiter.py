@@ -91,7 +91,9 @@ def plan_frames(duration: float, segments: list[dict], *,
                 window_after_s: float = config.ARBITER_WINDOW_AFTER_S,
                 window_step_s: float = config.ARBITER_WINDOW_STEP_S,
                 sweep_every_s: float = config.ARBITER_SWEEP_EVERY_S,
-                max_frames: int = config.ARBITER_MAX_FRAMES) -> list[PlannedFrame]:
+                max_frames: int = config.ARBITER_MAX_FRAMES,
+                sweep_budget_frac: float = config.ARBITER_SWEEP_BUDGET_FRAC
+                ) -> list[PlannedFrame]:
     """Curate the sparse VLM frame list, capped by striding not truncating."""
     if duration <= 0:
         return []
@@ -144,7 +146,7 @@ def plan_frames(duration: float, segments: list[dict], *,
             add(k, PRIO_SWEEP, "sweep")
         k += sweep_every_s
 
-    # --- budget: verify always; thin windows then sweep by striding ---
+    # --- budget: verify always; sweep guaranteed a share; windows the rest ---
     frames = list(planned.values())
     by_reason: dict[str, list[PlannedFrame]] = {}
     for f in sorted(frames, key=lambda f: f.t):
@@ -158,9 +160,12 @@ def plan_frames(duration: float, segments: list[dict], *,
 
     kept = thin(by_reason.get("verify", []), max_frames)
     budget = max_frames - len(kept)
+    # sweep BEFORE windows: it is the only global coverage and loses the
+    # budget race otherwise (windows hug already-flagged segments)
+    sweeps = thin(by_reason.get("sweep", []),
+                  min(budget, int(max_frames * sweep_budget_frac)))
+    budget -= len(sweeps)
     windows = thin(by_reason.get("window", []), budget)
-    budget -= len(windows)
-    sweeps = thin(by_reason.get("sweep", []), budget)
 
     out = sorted(kept + windows + sweeps, key=lambda f: f.t)
     return out
@@ -235,11 +240,16 @@ def aggregate(planned: list[PlannedFrame], verdicts: list[dict | None],
             "mean_confidence": round(conf, 3),
         })
 
-    hits = sorted((f.t, v["confidence"])
+    # hits outside segments -> new-segment candidates. Sweep hits are POINT
+    # samples (no 1s grid around them): pad them wide; window hits keep the
+    # normal pad (their neighborhood is densely sampled).
+    hits = sorted((f.t, v["confidence"],
+                   config.ARBITER_SWEEP_PAD_S if f.reason == "sweep"
+                   else smoothing.pad_s)
                   for f, v in zip(planned, verdicts)
                   if v is not None and v["explicit"] and f.seg_idx is None)
     chain_gap = _chain_gap(planned)
-    raw_segs = _cluster_hits(hits, chain_gap, smoothing.pad_s)
+    raw_segs = _cluster_hits(hits, chain_gap)
     clipped: list[dict] = []
     for a, b, score in raw_segs:
         pieces = _subtract([(a, b)],
@@ -275,12 +285,13 @@ def _chain_gap(planned: list[PlannedFrame]) -> float:
     return min(6.0, max(2.5, typical * 1.5))
 
 
-def _cluster_hits(hits: list[tuple], chain_gap: float,
-                  pad_s: float) -> list[tuple]:
-    """[(t, conf)] -> [(start, end, mean_conf)], chained by chain_gap+pad."""
+def _cluster_hits(hits: list[tuple], chain_gap: float
+                  ) -> list[tuple]:
+    """[(t, conf, pad_s)] -> [(start, end, mean_conf)], each hit padded by
+    its own pad (sweep hits pad wide), chained by chain_gap."""
     segs: list[tuple] = []
-    for t, conf in hits:
-        a, b = t - pad_s, t + pad_s
+    for t, conf, pad in hits:
+        a, b = t - pad, t + pad
         if segs and a - segs[-1][1] <= chain_gap:
             pa, pb, (pc, pn) = segs[-1]
             segs[-1] = (pa, max(pb, b), (pc + conf, pn + 1))

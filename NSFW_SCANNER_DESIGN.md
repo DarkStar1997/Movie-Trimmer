@@ -266,10 +266,41 @@ regions usually judged false). Consequence: `arbiter_mode=apply` is
 **add-only** — VLM-found segments merge in, detector segments are never
 removed on non-confirmation; `rejected` verdicts stay informational.
 
-Frame budget: 41 segments x 3 verify + thinned 10s-before/45s-after windows
-consumed all 250 slots, leaving none for the global sweep — known isolated
-spots (e.g. 01:40:23) can go unsampled; raise `ARBITER_MAX_FRAMES` or trim
-`ARBITER_WINDOW_AFTER_S` if sweep coverage matters.
+### Frame budget & sweep starvation (recall fix, 2026-11-01)
+
+The original budget order (verify → windows → sweep) starved the global
+sweep to near-zero whenever a movie had many segments: on Ex Machina the
+47 segments' verify+window candidates consumed the whole 250-frame cap,
+leaving the sweep — the *only* sampling of regions far from any detector
+segment — with single-digit frames (60s+ sampling gaps, 240s worst-case
+blind gap). That was the structural cause of "nudity not detected" in
+scene-change/edit-heavy films. Three changes (`scanner/config.py`, all
+env-overridable):
+
+1. **Allocation order is verify → sweep → windows.** The sweep gets a
+   guaranteed `ARBITER_SWEEP_BUDGET_FRAC` (0.5) share of the cap before
+   windows refine already-flagged neighborhoods; windows take the rest.
+2. **Denser defaults**: `ARBITER_SWEEP_EVERY_S` 60 → **15**, 
+   `ARBITER_MAX_FRAMES` 250 → **700**. On the 6481s reference film:
+   141 verify + 350 sweep + 209 window frames, 15s median blind-spot
+   spacing, 61.8s worst gap (was 240s).
+3. **`ARBITER_SWEEP_PAD_S` (8.0)**: a sweep hit is a point sample of a
+   scene of unknown extent — it pads ±8s (window hits keep the 1.5s
+   smoothing pad since their neighborhood is on a 1s grid), and adjacent
+   sweep hits chain into one segment.
+
+Measured A/B (same tuned policy, only the arbiter changed): flagged
+coverage 349.0s → 393.8s (+12.8%), VLM segments 6 → 9 — three scenes the
+detector missed entirely (t≈3406, 4276, 5752), the hotel-scene fragments
+chained into continuous coverage (4222–4239, 4333–4348), and the finale
+extended to 5784–5846 unbroken. The 26s of "lost" coverage was 0.3–0.5s
+pad slivers plus 4 borderline detector segments (score 0.26–0.46) that
+flicker run-to-run regardless of the arbiter. Cost: arbiter wall
+343.5s for 700 frames (0 refusals) — scan total 8m03s (13.4× realtime),
+detector pass unchanged (~2m20s).
+
+Residual: sub-15s scenes between grid points can still slip through; the
+next lever is a denser sweep (cap 1200 / every 8s ≈ +2min arbiter).
 
 ## 8. Stage C: mask-precision blur render (empirical, 2026-10-31)
 
