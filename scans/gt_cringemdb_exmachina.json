@@ -1,0 +1,38 @@
+{
+  "source": "CringeMDB — https://cringemdb.com/movie/ex-machina-2015",
+  "media": "Ex.Machina.2015.1080p.BluRay.x264.YIFY.mp4",
+  "duration_s": 6480.96,
+  "retrieved": "2026-11-01",
+  "provenance": "Community/subtitle-derived timestamps for the 1h48m release (matches our file). Entries are unverified on CringeMDB and 'can be off by a minute or so'. Scenes below were spot-verified against our file by skin-fraction analysis at the stated frames (see 'verified').",
+  "note": "Incomplete list: CringeMDB has nothing for the ~1:10 hotel scenes or ~1:35-1:37 finale that our pipeline covers strongly — use this file to measure recall in the 52-58 min weak region, not as full-movie truth.",
+  "scenes": [
+    {
+      "start": 3136.0, "end": 3138.0, "time": "52:16-52:18",
+      "label": "NUDITY_MODERATE",
+      "desc": "Brief shot of a naked woman lying on a bed",
+      "verified": "yes - skin fraction 0.80 at t=3137"
+    },
+    {
+      "start": 3197.0, "end": 3247.0, "time": "53:17-54:07",
+      "label": "NUDITY_MODERATE",
+      "desc": "A naked woman lies motionless on a bed",
+      "verified": "uncertain - no skin signal at t=3220; possibly dim/graded or offset"
+    },
+    {
+      "start": 3301.0, "end": 3472.0, "time": "55:01-57:52",
+      "label": "SEX_SCENE_BRIEF",
+      "desc": "A couple is briefly seen having sex from a distance",
+      "verified": "yes - skin fraction 0.52 at t=3400"
+    },
+    {
+      "start": 3476.0, "end": 3490.0, "time": "57:56-58:10",
+      "label": "NUDITY_MODERATE",
+      "desc": "A woman opens her dress, briefly exposing her breasts",
+      "verified": "yes - skin fraction 0.30-0.60 near t=3483"
+    }
+  ],
+  "out_of_scope": [
+    {"start": 5392.0, "end": 5529.0, "time": "1:29:52-1:32:09",
+     "label": "VIOLENCE_EXPLICIT", "desc": "violent struggle - not our scope"}
+  ]
+}
