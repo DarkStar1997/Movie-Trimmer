@@ -66,7 +66,9 @@ curl -X POST http://localhost:8081/scan \
   -F arbiter=true -F arbiter_mode=verify
 
 # stage C blur: mask-precision pixelation instead of cutting. Segments from
-# a scan_id (its policy is reused) or explicit JSON; optional preview window.
+# a scan_id (its policy is reused), explicit [[start, end]] pairs, or full
+# segment dicts (a saved scan's segments array — labels/mean_score survive,
+# so arbiter-found "VLM" segments get masked); optional preview window.
 curl -X POST http://localhost:8081/blur \
   -F video_path=/movies/film.mkv -F scan_id={scan_id}
 curl -X POST http://localhost:8081/blur \
@@ -79,6 +81,12 @@ curl http://localhost:8081/blur/{blur_id}   # status -> output path in /outputs
 # VBR + explicit CQ); frames never touch the CPU, audio/subs passthrough with
 # bit-exact PTS — no cut boundaries, so the timeline cannot drift.
 # Previews re-encode the window only (pipe path).
+# masking: the FULL person is blurred (matched RF-DETR mask; padded box
+# fallback for close-ups), tracked across detector flicker until they leave
+# the frame; arbiter/VLM-found segments mask every person (centered-frame
+# fallback). Every flagged frame also gets red top-left overlay text
+# "VULGARITY DETECTED / <conf>% <label>" — visible even where the mosaic
+# isn't (smooth/dim scenes). BLUR_OVERLAY=0 env disables it.
 
 # feed a scan result to the trimmer (segments JSON = seconds)
 curl -X POST http://localhost:8000/submit -F file=@film.mkv \

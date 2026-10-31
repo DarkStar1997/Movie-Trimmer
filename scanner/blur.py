@@ -5,14 +5,23 @@ Two passes over the movie:
   analysis (cheap, flagged ranges only)
     For each remove-segment, decode [start, end] at BLUR_KEYFRAME_FPS and
     analysis size (the scan's decode size — detection parity). Run NudeNet
-    per batch; for every keyframe whose detections pass the policy triggers,
-    compute the blur mask:
+    per batch; per keyframe the blur mask is:
 
-        mask = union over explicit boxes of
-                 ( person mask matched to that box  AND  padded box )
-               falling back to the padded box rectangle when the person
-               segmenter finds no match (close-up crops where the person
-               detector fails are exactly when the box matters).
+      detector segments — union over trigger-passing boxes of the MATCHED
+      person's full-body mask (the whole person is blurred, not just the
+      part box); padded box-rect fallback when no person matches (close-up
+      crops where the person detector fails are exactly when the box
+      matters). When NudeNet flickers off, the last matched person box is
+      re-matched so the person stays masked while in frame (tracking).
+      Arbiter/VLM-found segments have no boxes by construction (NudeNet's
+      blind spots) — every person the segmenter finds is masked, with a
+      centered-frame-rectangle fallback.
+
+    Every masked keyframe carries (label, score) for the warning overlay;
+    at render time each flagged frame gets red top-left text
+    "VULGARITY DETECTED / <conf>% <label>" (BLUR_OVERLAY kill-switch) —
+    the mosaic destroys texture, not silhouettes, so smooth/dim scenes
+    need a visible flag.
 
     Masks are dilated at analysis resolution (covers keyframe-hold motion)
     and stored packed per keyframe timestamp.
@@ -137,24 +146,110 @@ def pixelate(frame: np.ndarray, mask: np.ndarray, block_px: int) -> np.ndarray:
     return out
 
 
+# warning overlay: every flagged frame tells the viewer what happened,
+# even when the mosaic itself is invisible on ultra-smooth/dim scenes
+OVERLAY_HEAD = "VULGARITY DETECTED"
+OVERLAY_FILL_RGB = (255, 0, 0)     # pure red (RGB frame order)
+OVERLAY_OUTLINE_RGB = (0, 0, 0)    # black outline for contrast on red scenes
+
+
+def draw_warning(canvas_rgb: np.ndarray, label: str, score: float,
+                 fill: tuple = OVERLAY_FILL_RGB,
+                 outline: tuple = OVERLAY_OUTLINE_RGB) -> None:
+    """In-place red warning text, top-left: VULGARITY DETECTED / conf% label.
+
+    Resolution-scaled (font ~ 1.15x at 1080p width); the outline is a
+    thicker stroke drawn under the fill. Callers compositing in NV12 pass
+    sentinel colors and derive masks from the channels."""
+    h, w = canvas_rgb.shape[:2]
+    fs = max(0.55, 1.15 * w / 1920)
+    th = max(2, int(round(2.5 * w / 1920)))
+    lines = (OVERLAY_HEAD,
+             f"{int(round(float(score) * 100))}%  {label}" if label
+             else f"{int(round(float(score) * 100))}%")
+    x = max(8, int(0.018 * w))
+    y = max(int(0.055 * h), int(fs * 30))
+    step = int(fs * 42)
+    for line in lines:
+        cv2.putText(canvas_rgb, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    fs, outline, th + 3, cv2.LINE_AA)
+        cv2.putText(canvas_rgb, line, (x, y), cv2.FONT_HERSHEY_SIMPLEX,
+                    fs, fill, th, cv2.LINE_AA)
+        y += step
+
+
 def keyframe_masks_for(dets_per_frame, frames, policy, segmenter,
-                       dilate_px: int) -> list[np.ndarray]:
-    """Per keyframe blur mask (analysis res) for one batch of frames."""
-    masks = []
+                       dilate_px: int, vlm_source: bool = False,
+                       vlm_score: float = 0.9,
+                       track_state: dict | None = None
+                       ) -> list[tuple[np.ndarray, str, float]]:
+    """Per keyframe (mask, label, score) at analysis res for one batch.
+
+    Detector-sourced segments: for each explicit-part box the matched
+    person's FULL mask is used (not the part-box intersection — the brief
+    is to blur the whole person). When no person matches the box, the
+    padded box rectangle is the fallback (close-up crops where the person
+    detector fails are exactly when the box matters; an unmatched person
+    mask would risk blurring the wrong person). NudeNet flicker is bridged
+    by re-matching the last matched person box (track_state) so the person
+    stays masked for as long as they remain in frame.
+
+    VLM-sourced segments (arbiter-found blind spots): NudeNet is blind
+    exactly there, so masks come from masking EVERY person the segmenter
+    finds, with a center-box fallback when it finds nobody.
+    """
+    state = track_state if track_state is not None else {}
+    out: list[tuple[np.ndarray, str, float]] = []
     for frame, dets in zip(frames, dets_per_frame):
         h, w = frame.shape[:2]
         union = np.zeros((h, w), dtype=bool)
+        label, score = "", 0.0
+
+        if vlm_source:
+            # arbiter segment: no NudeNet boxes by construction — mask all
+            # persons; the VLM saw nudity, so err wide
+            pmask = segmenter.all_persons(frame)
+            if pmask is None or not pmask.any():
+                frac = config.BLUR_VLM_CENTER_FRAC
+                pmask = box_mask(
+                    np.asarray([(1 - frac) * w / 2, (1 - frac) * h / 2,
+                                (1 + frac) * w / 2, (1 + frac) * h / 2]),
+                    w, h)
+            out.append((dilate_mask(pmask, dilate_px), "VLM", vlm_score))
+            continue
+
+        # strongest trigger-passing detection this frame (for the overlay)
+        for d in dets:
+            thr = policy.triggers.get(d.label)
+            if (thr is not None and d.score >= thr and d.score > score
+                    and d.area_fraction(w, h) >= policy.min_box_area_frac):
+                label, score = d.label, d.score
+
         boxes = explicit_boxes(dets, policy, w, h)
-        for bx in boxes:
-            pmask, _, _ = segmenter.infer(frame, match_box=bx)
-            padded = pad_box(bx, config.BLUR_BOX_PAD_FRAC, w, h)
-            if pmask is not None:
-                union |= intersect_with_box(pmask, padded)
-            else:                      # no person match: box-rect fallback
-                union |= box_mask(padded, w, h)
-        union = dilate_mask(union, dilate_px)
-        masks.append(union)
-    return masks
+        if boxes:
+            for bx in boxes:
+                pmask, _, _, pbbox = segmenter.infer(frame, match_box=bx)
+                if pmask is not None and pbbox is not None:
+                    union |= pmask               # FULL person mask
+                    state["bbox"] = pbbox        # track for flicker frames
+                    state["label"], state["score"] = label, score
+                else:
+                    padded = pad_box(bx, config.BLUR_BOX_PAD_FRAC, w, h)
+                    union |= box_mask(padded, w, h)
+        elif state.get("bbox") is not None:
+            # NudeNet flickered off but the person may still be in frame:
+            # re-match the tracked person and keep their full mask on
+            pmask, _, _, pbbox = segmenter.infer(frame,
+                                                 match_box=state["bbox"])
+            if pmask is not None and pbbox is not None:
+                union |= pmask
+                state["bbox"] = pbbox
+                label = state.get("label", "")
+                score = state.get("score", 0.0)
+            else:
+                state["bbox"] = None             # person left the frame
+        out.append((dilate_mask(union, dilate_px), label, score))
+    return out
 
 
 # --- analysis pass ----------------------------------------------------------------
@@ -162,7 +257,11 @@ def keyframe_masks_for(dets_per_frame, frames, policy, segmenter,
 def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
                   detector: NudeNetDetector, segmenter: PersonSegmenter,
                   aw: int, ah: int, batch_size: int = 16) -> dict[int, list]:
-    """-> {segment_index: [(t, packed_mask_bytes), ...]} sorted by t."""
+    """-> {segment_index: [(t, packed_mask_bytes, label, score), ...]} by t.
+
+    label/score ride along for the warning overlay: the trigger label +
+    score for detector segments, "VLM" + arbiter confidence for
+    arbiter-found segments (identified by 'arbiter' in seg['labels'])."""
     kf_fps = config.BLUR_KEYFRAME_FPS
     # dilation covers keyframe-hold motion; scaled to the analysis resolution
     dilate_px = max(3, int(round(config.BLUR_MASK_DILATE_FRAC * aw)))
@@ -171,16 +270,22 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
         start, end = float(seg["start"]), float(seg["end"])
         entries: list[tuple] = []
         t0 = max(0.0, start - 0.5)
+        vlm = "arbiter" in (seg.get("labels") or {})
+        vlm_score = float(seg.get("mean_score") or 0.9)
+        track_state: dict = {}
 
         def flush(frames, first_idx):
             results = detector.detect_frames(frames)
             masks = keyframe_masks_for(results, frames, policy, segmenter,
-                                       dilate_px)
-            for j, m in enumerate(masks):
+                                       dilate_px, vlm_source=vlm,
+                                       vlm_score=vlm_score,
+                                       track_state=track_state)
+            for j, (m, label, score) in enumerate(masks):
                 if m.any():
                     t = t0 + (first_idx + j) / kf_fps
                     if start <= t <= end:
-                        entries.append((t, np.packbits(m).tobytes()))
+                        entries.append((t, np.packbits(m).tobytes(),
+                                        label, score))
 
         def analyze(hw: bool) -> None:
             dec = FFmpegPipeDecoder(video_path, fps=kf_fps, width=aw,
@@ -212,8 +317,9 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
         except Exception as e:  # noqa: BLE001
             logger.warning("[blur] analysis of segment %d failed: %s", si, e)
         per_seg[si] = entries
-        logger.info("[blur] segment %d [%d-%d]: %d mask keyframes",
-                    si, int(start), int(end), len(entries))
+        logger.info("[blur] segment %d [%d-%d]%s: %d mask keyframes",
+                    si, int(start), int(end),
+                    " (vlm)" if vlm else "", len(entries))
     return per_seg
 
 
@@ -297,8 +403,12 @@ def _render_range(video_path: str, t0: float, t1: float, w: int, h: int,
                                 packed, count=ah * aw).reshape(ah, aw)
                             held = {"si": si, "ki": ki, "mask": cv2.resize(
                                 m.astype(np.uint8), (w, h),
-                                interpolation=cv2.INTER_NEAREST).astype(bool)}
+                                interpolation=cv2.INTER_NEAREST).astype(bool),
+                                "label": entries[ki][2],
+                                "score": entries[ki][3]}
                         frame = pixelate(frame, held["mask"], block_px)
+                        if config.BLUR_OVERLAY:
+                            draw_warning(frame, held["label"], held["score"])
                         frames_blurred += 1
                     writer.stdin.write(frame.tobytes())
                     frames_out += 1
@@ -329,7 +439,8 @@ def render_pass(video_path: str, out_path: str, segments: list[dict],
     block_px = max(2, int(round(pixels * w / 1920)))
     seg_bounds = [(float(s["start"]), float(s["end"])) for s in segments]
     starts = [a for a, _ in seg_bounds]
-    kf_index = {si: [t for t, _ in entries] for si, entries in per_seg.items()}
+    kf_index = {si: [e[0] for e in entries]
+                for si, entries in per_seg.items()}
 
     frames_out, frames_blurred, codec = _render_range(
         video_path, window[0], window[1], w, h, aw, ah, per_seg, seg_bounds,
@@ -368,6 +479,15 @@ def run_blur(video_path: str, segments: list[dict], out_path: str, *,
                             segmenter, aw, ah)
     if not any(per_seg.values()):
         raise RuntimeError("analysis produced no masks — nothing to blur")
+
+    # analysis is done: free its TRT engines so the render has the whole
+    # GPU (render re-imports nothing from analysis)
+    del detector, segmenter
+    try:
+        import torch
+        torch.cuda.empty_cache()
+    except ImportError:
+        pass
 
     out_path = str(out_path)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)

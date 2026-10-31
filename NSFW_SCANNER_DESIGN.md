@@ -275,17 +275,53 @@ spots (e.g. 01:40:23) can go unsampled; raise `ARBITER_MAX_FRAMES` or trim
 
 Architecture: two passes. **Analysis** decodes only flagged ranges at
 8 fps (BLUR_KEYFRAME_FPS) at scan resolution, runs NudeNet per batch, and
-for every keyframe with policy-triggering detections composes
+composes the per-keyframe mask as
 
-    mask = union over explicit boxes of ( person_mask(box) AND padded_box )
+    detector segments:  union over explicit boxes of
+                          full person mask matched to that box
+                        (padded box-rect fallback when no person matches)
+    VLM (arbiter) segments:
+                          union mask of every person RF-DETR finds
+                        (centered ~0.7-frame rect fallback when it finds
+                         nobody)
 
-with a padded-box rectangle fallback when RF-DETR finds no matching person
-(close-up crops are exactly when the box matters). Masks are dilated
-(~1.2% of frame width) and stored packbits-compressed per keyframe.
-**Render** (full movies: GPU-native path below) decodes the whole movie,
-and for frames inside a segment holds the most recent keyframe mask
-(upscaled nearest), pixelates through it (24 px blocks at 1080p), and
-encodes with NVENC.
+with two added behaviors:
+
+- **Full-person blur.** The matched person's whole mask is used, not the
+  part-box intersection — the requirement is to blur the person, not the
+  part. Association accepts IoU > 0.3 OR >=60% containment of the part box
+  inside the person box (part boxes have inherently low IoU vs person
+  boxes); when nothing matches, the padded box rect is used — an unmatched
+  person mask risks blurring the wrong person.
+- **Person tracking across detector flicker.** The last matched person box
+  is remembered per segment; on keyframes where NudeNet finds nothing, the
+  box is re-matched and the full-person mask persists until the person
+  leaves the frame (mask + overlay survive sub-threshold flicker).
+
+Masks are dilated (~1.2% of frame width) and stored packbits-compressed
+per keyframe, each carrying (label, score) for the overlay. **Render**
+(full movies: GPU-native path below) decodes the whole movie, and for
+frames inside a segment holds the most recent keyframe mask (upscaled
+nearest), pixelates through it (24 px blocks at 1080p), composites the
+warning overlay, and encodes with NVENC.
+
+### Warning overlay (2026-11-01)
+
+Every flagged frame carries red top-left text:
+
+    VULGARITY DETECTED
+    87%  FEMALE_BREAST_EXPOSED
+
+Rationale: the mosaic destroys *texture*, not *silhouettes* — on
+ultra-smooth/dim scenes the blur is nearly invisible, so the viewer needs
+an explicit, unmissable flag on exactly the frames the pipeline acted on.
+Confidence is the triggering detection's score (or the arbiter's VLM
+confidence for arbiter-found segments, label `VLM`). Composited after the
+pixelate so the text stays crisp: pipe path draws via cv2 on RGB; the
+GPU-native path builds the text canvas once per keyframe (cv2), converts
+to NV12 masks, and does two `masked_fill_` passes with BT.709
+limited-range constants (red Y63 Cb102 Cr240, black outline Y16 Cb128
+Cr128). Kill-switch: `BLUR_OVERLAY=0` env.
 
 ### Validation findings (Ex Machina 1080p)
 
@@ -345,6 +381,16 @@ Every check passed end-to-end:
   in-process emulation: 671 vs 672 hot px) but barely visible, because
   pixelate destroys *texture*, not *silhouettes*. A bigger BLUR_PIXELS
   does not change this; a different blur style (gaussian/solid) would.
+
+### Torch↔NVENC stream ordering (found via the overlay, 2026-11-01)
+
+The in-place torch ops on the from_dlpack NV12 surface are async on
+torch's stream; NVENC reads the surface on its own stream without
+waiting for that queue. Without an explicit `torch.cuda.synchronize()`
+after the pixelate+overlay, the race drops the queue TAIL — measured on
+a 240-flagged-frame repro: the overlay (submitted last) was missing on
+135/240 frames while the pixelate (earlier kernels) always landed.
+Cost of the sync: none measurable (3.13s repro before and after).
 
 ### Splice rendering — attempted, then abandoned (documented failure)
 

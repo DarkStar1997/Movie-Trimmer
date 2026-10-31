@@ -100,7 +100,9 @@ def new_blur_entry(video_name: str) -> str:
 
 
 def resolve_segments(segments_json: Any, scan_id: str | None) -> list[dict]:
-    """Segments for a blur job: explicit JSON list, or a completed scan's."""
+    """Segments for a blur job: explicit JSON list, or a completed scan's.
+    JSON items may be [start, end] pairs or full segment dicts (labels and
+    mean_score are preserved for the VLM-segment masking path)."""
     if scan_id is not None:
         if scan_id not in scan_store:
             raise ValueError(f"scan id not found: {scan_id}")
@@ -114,10 +116,21 @@ def resolve_segments(segments_json: Any, scan_id: str | None) -> list[dict]:
         raise ValueError("segments must be a non-empty [[start, end], ...]")
     out = []
     for seg in segments_json:
-        a, b = float(seg[0]), float(seg[1])
+        if isinstance(seg, dict):
+            # full segment dicts (a saved scan's `segments` array): keep
+            # labels/mean_score — 'arbiter' in labels marks VLM-found
+            # segments that stage C must mask without NudeNet boxes
+            a, b = float(seg["start"]), float(seg["end"])
+        else:
+            a, b = float(seg[0]), float(seg[1])
         if not (0.0 <= a < b):
             raise ValueError(f"invalid segment [{a}, {b}]")
-        out.append({"start": a, "end": b})
+        entry = {"start": a, "end": b}
+        if isinstance(seg, dict):
+            for k in ("labels", "mean_score"):
+                if k in seg:
+                    entry[k] = seg[k]
+        out.append(entry)
     return out
 
 

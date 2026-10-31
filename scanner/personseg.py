@@ -66,10 +66,15 @@ def decode(outs: dict, in_names_map: dict, h0: int, w0: int,
            match_box: np.ndarray | None,
            num_select: int = NUM_SELECT,
            det_thr: float = PERSON_DETECT_THRESHOLD
-           ) -> tuple[np.ndarray | None, float, float]:
-    """Raw outputs -> (mask HxW bool | None, mask_area_fraction, score).
+           ) -> tuple[np.ndarray | None, float, float, np.ndarray | None]:
+    """Raw outputs -> (mask HxW bool | None, mask_area_fraction, score,
+    person_bbox xyxy | None).
 
-    `in_names_map` maps role -> output tensor name: {'dets','labels','masks'}.
+    person_bbox is set only when the match to `match_box` succeeded (IoU
+    above MATCH_IOU, or the explicit-part box is >=60% inside the person
+    box — containment matters for part boxes, whose IoU against a person
+    box is inherently low). Unmatched callers must NOT use the returned
+    mask as a full-person blur: it is whatever person scored highest.
     """
     logits = np.asarray(outs[in_names_map["labels"]], dtype=np.float32)
     boxes_cxcy = np.asarray(outs[in_names_map["dets"]], dtype=np.float32)
@@ -91,24 +96,60 @@ def decode(outs: dict, in_names_map: dict, h0: int, w0: int,
 
     keep = (top_scores >= det_thr) & (labels == PERSON_CLASS)
     if not keep.any():
-        return None, 0.0, 0.0
+        return None, 0.0, 0.0, None
     boxes_k, scores_k = xyxy[keep], top_scores[keep]
     rows_k = np.nonzero(keep)[0]
 
     r = int(np.argmax(scores_k))
+    matched_bbox: np.ndarray | None = None
     if match_box is not None:
-        best_iou, best_r = -1.0, r
+        best_key, best_r = -1.0, r
         for i, bx in enumerate(boxes_k):
             iou = _box_iou(bx, match_box)
-            if iou > best_iou:
-                best_iou, best_r = iou, int(i)
-        if best_iou > MATCH_IOU:
+            x1, y1 = max(bx[0], match_box[0]), max(bx[1], match_box[1])
+            x2, y2 = min(bx[2], match_box[2]), min(bx[3], match_box[3])
+            mb_area = max(0.0, (match_box[2] - match_box[0])
+                          * (match_box[3] - match_box[1]))
+            contained = (max(0.0, x2 - x1) * max(0.0, y2 - y1)
+                         / mb_area) if mb_area > 0 else 0.0
+            key = max(iou, contained)
+            if key > best_key:
+                best_key, best_r = key, int(i)
+        if best_key > MATCH_IOU or best_key > 0.6:
             r = best_r
+            matched_bbox = boxes_k[r]
 
     m_logits = masks[0, q_idx[rows_k[r]]]                  # (108,108)
     m = cv2.resize(m_logits, (w0, h0), interpolation=cv2.INTER_LINEAR)
     mask = m > 0.0
-    return mask, float(mask.mean()), float(scores_k[r])
+    return mask, float(mask.mean()), float(scores_k[r]), matched_bbox
+
+
+def persons_union(outs: dict, in_names_map: dict, h0: int, w0: int,
+                  num_select: int = NUM_SELECT,
+                  det_thr: float = PERSON_DETECT_THRESHOLD
+                  ) -> np.ndarray | None:
+    """Union mask of EVERY person instance above det_thr (or None). Used for
+    VLM-sourced segments, where no explicit-part box exists to match on."""
+    logits = np.asarray(outs[in_names_map["labels"]], dtype=np.float32)
+    masks = np.asarray(outs[in_names_map["masks"]], dtype=np.float32)
+    _, n_q, n_c = logits.shape
+    k = min(num_select, n_q * n_c)
+    prob = 1.0 / (1.0 + np.exp(-logits.reshape(-1)))
+    top_flat = np.argpartition(prob, -k)[-k:]
+    order = np.argsort(-prob[top_flat])
+    top_flat = top_flat[order]
+    q_idx = top_flat // n_c
+    labels = top_flat % n_c
+    keep = (prob[top_flat] >= det_thr) & (labels == PERSON_CLASS)
+    if not keep.any():
+        return None
+    union = np.zeros((h0, w0), dtype=bool)
+    for q in q_idx[keep]:
+        m = cv2.resize(masks[0, q], (w0, h0),
+                       interpolation=cv2.INTER_LINEAR)
+        union |= m > 0.0
+    return union
 
 
 class PersonSegmenter:
@@ -166,8 +207,12 @@ class PersonSegmenter:
     # -- inference ----------------------------------------------------------
     def infer(self, frame_rgb: np.ndarray,
               match_box: np.ndarray | None = None) -> tuple[np.ndarray | None,
-                                                            float, float]:
-        """-> (mask HxW bool | None, mask_area_fraction, score)."""
+                                                            float, float,
+                                                            np.ndarray | None]:
+        """-> (mask HxW bool | None, mask_area_fraction, score,
+        matched person_bbox xyxy | None). matched bbox is None when the
+        association failed — callers must not treat that mask as the
+        matched person's full-body mask (see decode)."""
         h0, w0 = frame_rgb.shape[:2]
         blob = preprocess(frame_rgb, self.resolution)
         if self.backend_name == "ort":
@@ -195,7 +240,33 @@ class PersonSegmenter:
         h, w = frame_rgb.shape[:2]
         union = np.zeros((h, w), dtype=bool)
         for bx in boxes_xyxy:
-            mask, _, score = self.infer(frame_rgb, np.asarray(bx, np.float32))
-            if mask is not None:
+            mask, _, _, pbbox = self.infer(frame_rgb,
+                                           np.asarray(bx, np.float32))
+            # only masks whose person actually matched the box
+            if mask is not None and pbbox is not None:
                 union |= mask
         return union
+
+    def all_persons(self, frame_rgb: np.ndarray) -> np.ndarray | None:
+        """-> union mask of every person instance, or None when the
+        segmenter finds nobody. VLM-sourced segments have no explicit-part
+        box to associate on, so every person present gets masked."""
+        h0, w0 = frame_rgb.shape[:2]
+        blob = preprocess(frame_rgb, self.resolution)
+        if self.backend_name == "ort":
+            outs = {
+                n: self.ort.sess.run(None, {self.ort.input_name: blob})[i]
+                for i, n in enumerate(("dets", "labels", "masks"))
+            }
+            return persons_union(outs, {"dets": "dets", "labels": "labels",
+                                        "masks": "masks"}, h0, w0)
+        torch = self._torch
+        t = torch.from_numpy(blob).to(self.engine.device)
+        raw = self.engine.run({self.engine.in_names[0]: t})
+        outs = {k: raw[n].float().cpu().numpy()
+                for k, n in
+                (("dets", self._names["dets"]),
+                 ("labels", self._names["labels"]),
+                 ("masks", self._names["masks"]))}
+        return persons_union(outs, {"dets": "dets", "labels": "labels",
+                                    "masks": "masks"}, h0, w0)

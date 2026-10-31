@@ -12,9 +12,10 @@ cut semantics; this design removes the class of failure entirely):
                   -> FFmpegMuxer (audio/subs passthrough, bit-exact PTS)
 
 Frames never touch the CPU; the blur is ~2 pooled resamples + a where() on
-the GPU per frame. The demux/decode/encode/mux loop is the PyNvVideoCodec
-`advanced/transcode.py` reference with the blur inserted between Decode()
-and Encode().
+the GPU per frame, and the warning overlay is two masked_fill_ passes over
+precomputed BT.709 NV12 color constants. The demux/decode/encode/mux loop is
+the PyNvVideoCodec `advanced/transcode.py` reference with the blur inserted
+between Decode() and Encode().
 """
 
 from __future__ import annotations
@@ -78,7 +79,7 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
 
     seg_bounds = [(float(s["start"]), float(s["end"])) for s in segments]
     starts = [a for a, _ in seg_bounds]
-    kf_index = {si: [t for t, _ in entries]
+    kf_index = {si: [e[0] for e in entries]
                 for si, entries in per_seg.items()}
 
     # full-res mask cache: (si, ki) -> (y bool (h,w), uv bool (h/2, w))
@@ -118,6 +119,49 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
             muv, up_u.squeeze(0).squeeze(0).round().clamp(0, 255),
             uv).to(torch.uint8))
 
+    # warning overlay, NV12 / BT.709 limited range: pure red -> Y 63 Cb 102
+    # Cr 240; black outline -> Y 16 Cb 128 Cr 128. Cached per (si, ki).
+    RED_Y, RED_CB, RED_CR = 63, 102, 240
+    BLK_Y, BLK_CB, BLK_CR = 16, 128, 128
+
+    def overlay_masks(si: int, ki: int):
+        """-> (red_y, blk_y, red_uv, blk_uv) bool tensors, or None when the
+        overlay is disabled. Masks are derived from a sentinel-colored
+        canvas (fill R-channel, outline B-channel) rendered once per
+        keyframe entry — the label/score ride in the analysis entries."""
+        if not config.BLUR_OVERLAY:
+            return None
+        key = ("overlay", si, ki)
+        if key not in mask_cache:
+            from .blur import draw_warning
+            entry = per_seg[si][ki]
+            canvas = np.zeros((h, w, 3), dtype=np.uint8)
+            draw_warning(canvas, entry[2], entry[3],
+                         fill=(255, 0, 0), outline=(0, 0, 255))
+            red = canvas[..., 0] > 127
+            blk = canvas[..., 2] > 127
+
+            def uv_of(m: np.ndarray) -> torch.Tensor:
+                m2 = (m[0::2, 0::2] | m[1::2, 0::2]
+                      | m[0::2, 1::2] | m[1::2, 1::2])   # 2x2 union
+                return _torch_mask(np.repeat(m2, 2, axis=1), device)
+
+            mask_cache[key] = (_torch_mask(red, device),
+                               _torch_mask(blk, device),
+                               uv_of(red), uv_of(blk))
+        return mask_cache[key]
+
+    def composite_overlay(t: torch.Tensor, ov) -> None:
+        ry, by, ruv, buv = ov
+        y, uv = t[:h], t[h:]
+        y.masked_fill_(by, BLK_Y)
+        y.masked_fill_(ry, RED_Y)
+        cb, cr = uv[:, 0::2], uv[:, 1::2]
+        cb.masked_fill_(buv[:, 0::2], BLK_CB)
+        cr.masked_fill_(buv[:, 1::2], BLK_CR)
+        cb.masked_fill_(ruv[:, 0::2], RED_CB)
+        cr.masked_fill_(ruv[:, 1::2], RED_CR)
+
     frames = blurred = 0
     held = {"si": -1, "ki": -1}
     last_progress = time.monotonic()
@@ -141,6 +185,15 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
                             held = {"si": si, "ki": ki}
                         surf = torch.from_dlpack(frame)
                         pixelate_yuv(surf, *full_masks(si, ki))
+                        ov = overlay_masks(si, ki)
+                        if ov is not None:
+                            composite_overlay(surf, ov)
+                        # our kernels are async on torch's stream; NVENC
+                        # reads the surface without waiting for that queue
+                        # — without this sync the race drops the tail of
+                        # the queue (observed: overlay flickering off on
+                        # ~half the flagged frames)
+                        torch.cuda.synchronize()
                         blurred += 1
                     pp = nvc.NV_ENC_PIC_PARAMS()
                     pp.inputTimeStamp = frames

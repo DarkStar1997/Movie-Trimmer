@@ -125,6 +125,17 @@ BLUR_PIXELS = 24            # pixelate block size at 1080p (scaled by width)
 # while hevc/h264 accept the full quality args. libx264 = CPU last resort.
 BLUR_CODECS = ("hevc_nvenc", "h264_nvenc", "libx264")
 BLUR_CQ = 26                # NVENC constant-quality (libx264 crf equivalent)
+# Warning overlay: every flagged frame in the final render carries red
+# top-left text "VULGARITY DETECTED" + confidence% + label. This is the
+# remedy for mosaic-invisible misses on ultra-smooth/dim scenes: the
+# viewer always sees WHAT was flagged even when the blur itself is subtle.
+# Env kill-switch: BLUR_OVERLAY=0 disables.
+BLUR_OVERLAY = os.environ.get("BLUR_OVERLAY", "1").lower() not in (
+    "0", "false", "no", "off")
+# VLM-sourced (arbiter-found) segments have no NudeNet box; when the person
+# segmenter also finds nobody (extreme close-ups), mask this fraction of the
+# frame centered — conservative by design (VLM confidence is >=0.9 there).
+BLUR_VLM_CENTER_FRAC = 0.7
 # Kill a decode that produced no frame for this long (NVDEC wedge quirk)
 # instead of blocking the job forever; pipe-path callers retry once on CPU.
 BLUR_STALL_TIMEOUT_S = float(os.environ.get("BLUR_STALL_TIMEOUT_S", "120"))
