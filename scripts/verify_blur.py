@@ -152,6 +152,13 @@ def main():
                             .mean(axis=2).mean()), ps)
                      for ps in cands_near(t + 0.083, args.k)]
             plausible = [ps for m, ps in cands if m < 3.0]
+            if not plausible and cands and min(cands)[0] < 15.0:
+                # full-person / VLM masks cover most of the frame and push
+                # the mean above 3.0 against EVERY source candidate (measured
+                # 5.4-9.4 on legit full-person masks). Fall back to the
+                # closest candidate; the hot-pixel/std checks below still
+                # fail it if this is a wrong-frame or garbage match.
+                plausible = [min(cands)[1]]
             best_hot, pair = 0, None
             for ps in plausible:
                 src_frame = grab2(SRC, ps)
