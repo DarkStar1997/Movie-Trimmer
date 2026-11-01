@@ -156,7 +156,14 @@ def main():
                             .mean(axis=2).mean()), ps)
                      for ps in cands_near(t + 0.083, args.k)]
             plausible = [ps for m, ps in cands if m < 3.0]
-            if not plausible and cands and min(cands)[0] < 15.0:
+            # full-person-mask fallback: masks covering most of a frame
+            # legitimately push mean diff high (Gone Girl close-ups: 5-9;
+            # Saltburn's detail-dense party montage with a near-full-frame
+            # mask measured 16.2). The bound only pre-filters candidates —
+            # the hot-pixel and texture-crushing tests below are the real
+            # blur-vs-wrong-frame discriminators (a wrong frame is hot
+            # everywhere but NOT locally smoother), so it can be generous.
+            if not plausible and cands and min(cands)[0] < 24.0:
                 # full-person / VLM masks cover most of the frame and push
                 # the mean above 3.0 against EVERY source candidate (measured
                 # 5.4-9.4 on legit full-person masks). Fall back to the
