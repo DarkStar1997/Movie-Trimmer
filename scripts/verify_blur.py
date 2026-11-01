@@ -171,8 +171,17 @@ def main():
                 if hot > best_hot:
                     best_hot, pair = hot, (src_frame, d)
             if pair is None:
-                results.append(ok(f"blur present @ seg {i} ({t:.1f}s)",
-                                  False, "no plausible counterpart"))
+                if plausible:
+                    # counterpart matched but ZERO hot pixels anywhere:
+                    # the frame is (near-)identical to source — the blur
+                    # is MISSING here, not unmatchable
+                    results.append(ok(f"blur present @ seg {i} ({t:.1f}s)",
+                                      False,
+                                      "counterpart matched, no blur diff"
+                                      " (unblurred frame)"))
+                else:
+                    results.append(ok(f"blur present @ seg {i} ({t:.1f}s)",
+                                      False, "no plausible counterpart"))
                 continue
             src_frame, d = pair
             ys, xs = np.nonzero(d > 20)
