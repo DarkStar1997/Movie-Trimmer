@@ -9,6 +9,9 @@
 # ~22.5GB of 24GB in use.
 services:
   movie-trimmer:
+    # definite name so `docker ps` is readable and compose stops minting
+    # project-prefixed names; run.py (repo root) is the --rm alternative
+    container_name: movie-trimmer
     build:
       # compose silently skips services with no build: section — the pair
       # layout once shipped a "fix" that wasn't in the container this way
