@@ -575,6 +575,29 @@ Every check passed end-to-end:
   pixelate destroys *texture*, not *silhouettes*. A bigger BLUR_PIXELS
   does not change this; a different blur style (gaussian/solid) would.
 
+### Gone Girl validation (10-bit HEVC MKV, first all-in-one run, 2026-11-01)
+
+Same gate, new territory: yuv420p10le source, 45 SRT tracks, rendered by
+the single-container deployment end to end (scan → 30B arbiter → crowd →
+blur).
+
+- 214,355 frames (15,611 blurred across 38 segments) in **515s wall =
+  17.3× realtime**, NVENC pinned at 50% throughout, output stays
+  `hevc yuv420p10le` — bit depth preserved by the P010 path.
+- 12/13 gate checks PASS on first run: duration exact, packet count
+  exact, full-decode clean, blur present at all 4 spot segments, all 4
+  clean spots pixel-exact.
+- The 13th check exposed a *script* limitation, not a render defect: raw
+  packet pts/dts md5 differs across containers (mkv 1ms vs mp4 per-track
+  timescales renumber pts even for identical packets), and decoded PCM
+  differs by decode-side skip/edit-list semantics. The meaningful
+  invariant — verified by hand for this render — is the elementary
+  stream: the output's 279,437 eac3 packets are **byte-identical** to
+  the source's (payload md5 match). verify_blur.py now hashes packet
+  payload bytes (`-c copy -f data`) instead.
+- Subtitle streams are dropped by design (the muxer cannot carry them);
+  documented in §8's PyNvVideoCodec findings.
+
 ### Torch↔NVENC stream ordering (found via the overlay, 2026-11-01)
 
 The in-place torch ops on the from_dlpack NV12 surface are async on

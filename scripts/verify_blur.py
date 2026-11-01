@@ -26,7 +26,6 @@ blurred pair — presence therefore requires SOME plausible counterpart
 with a significant diff, absence requires the best match to be exact.
 """
 import argparse
-import hashlib
 import json
 import os
 import subprocess
@@ -127,11 +126,15 @@ def main():
                       f"{n_out} vs {n_src}"))
 
     def audio_sig(path):
-        o = run(["ffprobe", "-v", "error", "-select_streams", "a:0",
-                 "-show_entries", "packet=pts,dts,duration,size",
-                 "-of", "csv=p=0", path]).stdout
-        return hashlib.md5(o.encode()).hexdigest()
-    results.append(ok("audio packets bit-exact (pts/dts/size md5)",
+        # md5 over the concatenated packet PAYLOAD bytes (-f data): raw
+        # pts/dts strings differ across containers (mkv 1ms vs mp4
+        # per-track timescales) and decoded PCM differs by decode-side
+        # skip/edit-list semantics — neither is a passthrough defect.
+        # Byte-exact elementary stream is the meaningful invariant.
+        o = run(["ffmpeg", "-v", "error", "-i", path, "-map", "0:a:0",
+                 "-c", "copy", "-f", "data", "-"])
+        return hashlib.md5(o.stdout).hexdigest()
+    results.append(ok("audio packets bit-exact (payload md5)",
                       audio_sig(OUT) == audio_sig(SRC), ""))
 
     with tempfile.TemporaryDirectory(prefix="verify_blur_") as tmp:
