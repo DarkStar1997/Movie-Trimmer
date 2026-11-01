@@ -9,25 +9,7 @@ audio and subtitles bit-exact. It began as a movie trimmer / subtitle merger
 The whole pipeline — detector, person gate, VLM arbiter, community
 timestamps, GPU blur render — runs in **one container** on one GPU.
 
-```
-movie file ──▶ Stage A: NudeNet TRT detector (4 fps, always on)
-                   │
-                   ▼
-               person gate: RF-DETR TRT (2 fps) — where is anyone on screen?
-                   │
-                   ▼
-               Stage B: VLM arbiter (opt-in, on-demand ~20 GB)
-               sparse Qwen3-VL pass — only where people are present
-                   │            + CringeMDB crowd timestamps (opt-in)
-                   ▼
-               segments (seconds, labeled by source)
-                   │
-                   ▼
-               Stage C: GPU blur render — NVDEC → person masks → NVENC
-                   │
-                   ▼
-               scripts/verify_blur.py — independent end-to-end gate (host)
-```
+![pipeline](docs/pipeline.png)
 
 Design principle throughout: **add-only**. Detector, crowd and VLM can each
 only add territory; nothing can shrink or remove a flagged range, so
