@@ -11,6 +11,23 @@ from scanner.persongate import smooth_person_presence
 
 # --- presence decode -----------------------------------------------------------
 
+def test_preprocess_blob_is_c_contiguous():
+    """REGRESSION (2026-11-02 'TRT is blind' incident): the numpy chain
+    (transpose view - means) / stds can allocate the blob Fortran-ordered
+    (HWC bytes). ORT honors strides; a TRT engine reads data_ptr() as
+    linear NCHW and turns such a blob into channel-spatial garbage — every
+    personseg TRT result was silently wrong until this was pinned."""
+    import cv2
+
+    from scanner.personseg import preprocess
+
+    frame = np.random.default_rng(0).integers(
+        0, 255, (360, 640, 3), dtype=np.uint8)
+    blob = preprocess(frame, 432)
+    assert blob.dtype == np.float32 and blob.shape == (1, 3, 432, 432)
+    assert blob.flags["C_CONTIGUOUS"]
+
+
 def test_person_presence_pure():
     # person query at 2.0 (sigmoid ~0.88); another class far higher —
     # presence must NOT depend on the global top-k cut

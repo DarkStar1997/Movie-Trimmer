@@ -93,7 +93,9 @@ class TrtBackend:
                      (max(1, min(batch_size, self.MAX_BATCH)), 3, res, res),
                      (self.MAX_BATCH, 3, res, res)))]
         self.engine = trt_mod.TrtEngine(
-            onnx_path, trt_mod.engine_path(onnx_path),
+            onnx_path,
+            trt_mod.engine_path(onnx_path,
+                                recipe="fp32" if fp32 else "fp16"),
             name=os.path.basename(onnx_path), fp32=fp32, profile=profile)
         self.input_name = self.engine.in_names[0]
         self.output_name = self.engine.out_names[0]

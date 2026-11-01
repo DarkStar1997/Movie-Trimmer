@@ -15,10 +15,12 @@ Precision policy (production lessons from visiontouch):
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
 from contextlib import nullcontext as _nullcontext
+from functools import lru_cache
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -54,11 +56,27 @@ def trt_slug() -> str:
     return slug
 
 
+@lru_cache(maxsize=64)
+def _content_hash(path: str, _size: int, _mtime: int) -> str:
+    """First 8 hex of the file's MD5 (cached on size+mtime). Engines are
+    cached by filename-derived version alone elsewhere; this binds them
+    to the exact ONNX bytes so a re-exported same-named file can never
+    silently reuse a stale engine."""
+    h = hashlib.md5()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()[:8]
+
+
 def weights_version(source: str) -> str:
-    """``nudenet_640m_v1.onnx`` -> ``v1`` (see config.MODELS naming)."""
+    """``nudenet_640m_v1.onnx`` -> ``v1-ab12cd34``: the filename version
+    (see config.MODELS naming) plus a content fingerprint."""
     stem = os.path.splitext(os.path.basename(source))[0]
     m = re.search(r"_v(\d+(?:\.\d+)*)", stem)
-    return f"v{m.group(1)}" if m else "v0"
+    v = f"v{m.group(1)}" if m else "v0"
+    st = os.stat(source)
+    return f"{v}-{_content_hash(os.path.abspath(source), st.st_size, st.st_mtime_ns)}"
 
 
 def engine_cache_dir(base_dir: str | os.PathLike | None = None) -> Path:
@@ -71,11 +89,14 @@ def engine_cache_dir(base_dir: str | os.PathLike | None = None) -> Path:
     return d
 
 
-def engine_path(onnx_path: str) -> str:
-    """Versioned engine path inside the cache for a given ONNX source."""
+def engine_path(onnx_path: str, recipe: str = "") -> str:
+    """Versioned engine path inside the cache for a given ONNX source and
+    build recipe (e.g. "fp32" vs "fp16" builds of the same ONNX — they are
+    different engines and must never share a cache entry)."""
     stem = os.path.splitext(os.path.basename(onnx_path))[0]
     d = engine_cache_dir()
-    return str(d / f"{stem}.{weights_version(onnx_path)}.engine")
+    suffix = f".{recipe}" if recipe else ""
+    return str(d / f"{stem}.{weights_version(onnx_path)}{suffix}.engine")
 
 
 def prepare_onnx_fp16(onnx_path: str, mode: str) -> str:

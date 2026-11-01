@@ -56,10 +56,18 @@ def _box_iou(a, b) -> float:
 
 
 def preprocess(frame_rgb: np.ndarray, size: int) -> np.ndarray:
-    """RGB uint8 HxWx3 -> (1,3,size,size) normalized float32."""
+    """RGB uint8 HxWx3 -> (1,3,size,size) normalized float32.
+
+    ascontiguousarray is LOAD-BEARING: the arithmetic chain on a
+    transposed view lets numpy allocate the output Fortran-ordered
+    (HWC bytes). ORT honors numpy strides and reads it correctly, but a
+    TRT engine reads data_ptr() as LINEAR NCHW — feeding it HWC bytes
+    permutes channels with spatial and the engine outputs garbage (the
+    'TRT is blind' mystery, and the fitness-coach 'FP16 drifts by ~9'
+    lesson before it)."""
     r = cv2.resize(frame_rgb, (size, size), interpolation=cv2.INTER_LINEAR)
     t = r.astype(np.float32).transpose(2, 0, 1) / 255.0
-    return ((t - _MEANS) / _STDS)[None]
+    return np.ascontiguousarray(((t - _MEANS) / _STDS)[None])
 
 
 def decode(outs: dict, in_names_map: dict, h0: int, w0: int,
@@ -211,7 +219,7 @@ class PersonSegmenter:
         in_name = m.graph.input[0].name
         profile = [(in_name, ((1, 3, self.resolution, self.resolution),) * 3)]
         self.engine = TrtEngine(
-            self.onnx_path, engine_path(self.onnx_path),
+            self.onnx_path, engine_path(self.onnx_path, recipe="fp32"),
             name="person_seg_rfdetr_m", fp32=True, profile=profile)
         names = self.engine.out_names
         self._names = {

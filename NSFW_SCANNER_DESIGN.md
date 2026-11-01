@@ -935,6 +935,56 @@ Validation on Gone Girl: see the scan JSON `person_gate` block
 explicit frame the baseline arbiter found lies inside detected person
 ranges.
 
+## 12. The "TRT is blind" incident — preprocess contiguity (2026-11-02)
+
+The first person-pass probe over Gone Girl returned garbage: 10.1%
+person coverage (335 ranges averaging 2.7s) on a movie that is people
+talking for two and a half hours, and the gate-recall audit caught it
+(5/78 explicit moments covered). The hunt, compressed:
+
+- ORT (the ONNX) scored persons 0.94+ on the exact frames the TRT
+  engine scored 0.02–0.09 with nonsense classes (backpack, bear).
+- The cached engine was NOT stale: evicted + rebuilt FP32 (18s) and a
+  legacy non-strongly-typed FP32 build both reproduced the divergence —
+  and agreed with each other to the digit.
+- An op-level bisect (extract-model cuts + one-shot all-intermediates
+  probe) traced the first divergence to node #3: the identity
+  `Cast(input → float32)` — the engine was reading a permutation of the
+  input from the very first op.
+- A one-node Cast engine reproduced it with the real image blob but not
+  with random data. That asymmetry was the clue: **numpy's ufunc chain
+  `(transposed_view - means) / stds` allocates the blob Fortran-ordered
+  (HWC bytes)**. ORT honors numpy strides; a TRT engine reads
+  `data_ptr()` as LINEAR NCHW. Random arrays are C-ordered by
+  construction, so they passed.
+
+Fix: `personseg.preprocess` now ends in `np.ascontiguousarray(...)`
+(+ regression test `test_preprocess_blob_is_c_contiguous`).
+NudeNet was never affected — `cv2.dnn.blobFromImage` always returns a
+contiguous NCHW blob.
+
+Post-fix parity, TRT FP32 vs ORT on the audit frames: person column
+max agrees within ~0.015, detection counts equal; the only per-cell
+divergence is DETR's competitive query assignment flipping which query
+slot wins the same person (q16 vs q181, same box, same score) — kernel
+accumulation order, semantically nil.
+
+Implications:
+- The fitness-coach lesson "TRT 11 FP16 drifts RF-DETR logits by ~9"
+  was almost certainly THIS bug, not precision — the drift magnitude
+  matches the HWC/CHW permutation. FP32 didn't fix it then because the
+  input was misordered regardless of build precision.
+- Every personseg TRT result before this fix was garbage: the blur
+  renderer silently degraded to padded-box / center-box fallback masks
+  (safe — blur present, verify passes — but never person-shaped). Blur
+  artifacts produced before this fix are functionally box-blurs.
+- Engine cache keys now fingerprint the build recipe AND the ONNX
+  content (`{stem}.{vN}-{md5[:8]}.{recipe}.engine`): the filename-only
+  `vN` key could never invalidate a cached engine when the recipe
+  changed (fp16→fp32) or the ONNX was re-exported — and NudeNet had a
+  latent fp16/fp32 engine-name collision for the same reason.
+
+
 
 
 
