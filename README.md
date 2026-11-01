@@ -54,12 +54,16 @@ per-frame arbiter verdicts, crowd bookkeeping, and timings.
 
 **How the sources combine:**
 
-- **Detector (NudeNet 640m, TRT fp16, 4 fps)** — the always-on backbone;
-  weak sub-threshold flicker is bridged by a person-cluster tracker.
-- **Person gate (RF-DETR Seg Medium, TRT fp32, 2 fps)** — computes ranges
-  where a person is on screen. The arbiter only spends frames there: an
-  empty hallway cannot host explicit content. Gate recall is audited, not
-  assumed (78/78 explicit hits covered on the calibration movie).
+- **Detector (NudeNet 640m, TRT fp16)** — the always-on backbone:
+  **39–54× realtime** (a 2-hour film ≈ 3 min; ~935 fps sustained decode,
+  every frame decoded, 1-in-6 kept at 0.25 s sampling); weak sub-threshold
+  flicker is bridged by a person-cluster tracker.
+- **Person gate (RF-DETR Seg Medium, TRT fp32)** — presence pass riding
+  the same decode at zero extra decode cost (0.5 s resolution); computes
+  ranges where a person is on screen. The arbiter only spends frames
+  there: an empty hallway cannot host explicit content. Gate recall is
+  audited, not assumed (78/78 explicit hits covered on the calibration
+  movie).
 - **VLM arbiter (Qwen3-VL-30B-A3B via llama-server)** — judges sparse,
   curated frames: a person-gated global sweep (every 10 s), dense 1 s-spaced
   windows hugging every trusted segment's edges (10 s before / 45 s after —
@@ -125,6 +129,7 @@ Two full movies, no manual intervention between phases, judged by the gate:
 | frames blurred | 15,612 | 39,827 |
 | VLM new / edge-ext / merged | 16 / 5 / 2 | 11 / 31 / 7 |
 | scan → blur → verify | 882 / 507 / ~300 s | 1351 / 540 / 157 s |
+| throughput | decode ~935 fps · render 423 fps · arbiter 81–85 % of scan wall | |
 | verify gate | 24/24 PASS | 37/37 PASS |
 
 Saltburn end-to-end: **34.3 min** for a 131-minute film. Source codecs

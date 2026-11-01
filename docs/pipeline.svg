@@ -65,10 +65,11 @@
  <path d="M273 170 V186 M278 170 V186 M286 170 V186 M291 170 V186" stroke-width="1.1" opacity=".55"/>
 </g>
 <text x="268" y="212" class="ct">NudeNet detector</text>
-<text x="268" y="236" class="cd">TRT fp16 · 4 fps. Whole-timeline</text>
-<text x="268" y="253" class="cd">pass; a person-cluster tracker</text>
-<text x="268" y="270" class="cd">bridges sub-threshold flicker;</text>
-<text x="268" y="287" class="cd">smoothing emits trusted segments.</text>
+<text x="268" y="236" class="cd">TRT fp16 · 39–54× realtime — a</text>
+<text x="268" y="253" class="cd">2 h film in ≈ 3 min. Decodes</text>
+<text x="268" y="270" class="cd">every frame (~935 fps), samples</text>
+<text x="268" y="287" class="cd">every 0.25 s; tracker bridges</text>
+<text x="268" y="304" class="cd">flicker; smoothing → segments.</text>
 
 <path d="M520 239 H556 M552 235 L560 239 L552 243" class="arr" marker-end="url(#ah)"/>
 
@@ -81,10 +82,11 @@
  <path d="M584 171.6 V168.6 M584 184.4 V187.4 M577.6 178 H574.6 M590.4 178 H593.4" stroke-width="1" opacity=".6"/>
 </g>
 <text x="580" y="212" class="ct">RF-DETR person pass</text>
-<text x="580" y="236" class="cd">TRT fp32 · 2 fps. Where is anyone</text>
-<text x="580" y="253" class="cd">on screen? Opens person ranges;</text>
-<text x="580" y="270" class="cd">recall audited 78/78 on explicit</text>
-<text x="580" y="287" class="cd">hits — no empty-hallway sweeps.</text>
+<text x="580" y="236" class="cd">TRT fp32 · rides the same decode</text>
+<text x="580" y="253" class="cd">(free: no extra frames decoded).</text>
+<text x="580" y="270" class="cd">Where is anyone? Opens person</text>
+<text x="580" y="287" class="cd">ranges; recall 78/78 — no</text>
+<text x="580" y="304" class="cd">empty-hallway sweeps.</text>
 
 <path d="M832 239 H868 M864 235 L872 239 L864 243" class="arr" marker-end="url(#ah)"/>
 
@@ -197,8 +199,8 @@
 <text x="382" y="950" class="chip"><tspan class="chipb">Saltburn</tspan> · 76 segs · 39,827 frames · 37/37</text>
 <rect x="694" y="930" width="170" height="32" rx="16" class="chipbox"/>
 <text x="710" y="950" class="chip"><tspan class="chipb">end-to-end</tspan> 34.3 min</text>
-<rect x="876" y="930" width="366" height="32" rx="16" class="chipbox"/>
-<text x="892" y="950" class="chip">models baked in · <tspan class="chipb">zero runtime downloads</tspan></text>
+<rect x="876" y="930" width="250" height="32" rx="16" class="chipbox"/>
+<text x="892" y="950" class="chip">decode <tspan class="chipb">~935 fps</tspan> · render <tspan class="chipb">423 fps</tspan></text>
 
 <!-- legend -->
 <circle cx="42" cy="988" r="4" fill="#22d3ee"/><text x="52" y="992" class="lg">detector</text>
