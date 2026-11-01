@@ -57,12 +57,11 @@ for i, s in enumerate(segs):
             src.append(f"NudeNet: {k} ×{v}")
     if not src:
         v = seg_verdict(a, b)
-        if v and v["verdict"] == "rejected":
+        if v and v.get("valid_frames"):
             src.append(f"detector flag only — arbiter {v['explicit_frames']}/"
-                       f"{v['valid_frames']} frames explicit "
-                       f"(kept: add-only policy)")
+                       f"{v['valid_frames']} frames explicit (kept: add-only)")
         else:
-            src.append("detector flag only")
+            src.append("trusted (detector/crowd) — not re-judged by the VLM")
     rows.append({
         "i": i, "in": tc(a), "out": tc(b), "dur": round(b - a, 1),
         "sources": src, "conf": round(s.get("mean_score", 0.0), 2),

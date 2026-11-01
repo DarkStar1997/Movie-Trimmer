@@ -2,7 +2,10 @@
 
 Stage A (tracking, default on): person-cluster tracking with explicit-hold
 bridging — sub-threshold flicker inside a scene keeps it flagged.
-Stage B (arbiter, opt-in): sparse VLM verification + blind-gap sampling.
+Stage A2 (person gate, arbiter runs only): RF-DETR presence pass on the
+same decode stream -> person_ranges the arbiter sweep intersects with.
+Stage B (arbiter, opt-in): trusted-source planning + person-gated sparse
+VLM sweep; apply mode merges found segments (add-only).
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from .arbiter import run_arbiter
 from .decode import (analysis_size, open_decoder, probe_duration,
                      probe_dimensions)
 from .detector import NudeNetDetector
+from .persongate import PersonGateRunner
 from .policy import Policy
 from .temporal import SmoothingConfig, bin_timeline, smooth_segments
 from .tracking import TrackBridge, cluster_persons
@@ -65,7 +69,7 @@ def run_scan(
     track: bool = config.DEFAULT_TRACK,
     arbiter: bool = config.DEFAULT_ARBITER,
     arbiter_model: str = config.DEFAULT_ARBITER_MODEL,
-    arbiter_mode: str = "verify",
+    arbiter_mode: str = config.DEFAULT_ARBITER_MODE,
     crowd: bool = config.DEFAULT_CROWD,
     crowd_title: str | None = None,
     crowd_year: int | None = None,
@@ -89,6 +93,16 @@ def run_scan(
     bridge_only: list[bool] = []
     label_stats: Counter = Counter()
     weak_raw: list[tuple[float, float, str]] = []   # (t, score, label)
+    proxy_pts: list[float] = []     # NudeNet proxy-class hits (gate evidence)
+
+    # stage A2: RF-DETR person gate (only needed when the arbiter runs;
+    # fail-open — an engine problem costs VLM time, never coverage)
+    gate_runner: Optional[PersonGateRunner] = None
+    if arbiter and config.PERSON_GATE_ENABLED:
+        try:
+            gate_runner = PersonGateRunner(backend="trt")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[person-gate] init failed open: %s", e)
 
     # stage A: tracker over person clusters at the sample cadence
     bridge = TrackBridge(
@@ -105,6 +119,8 @@ def run_scan(
     logger.info("[scan] %s: %.1fs @ %.2ffps effective, %dx%d (%.2f:1), "
                 "backend=%s, track=%s", video_path, duration, eff_fps, aw, ah,
                 aw / ah, detector.backend_name, track)
+    gate_stride = max(1, round(eff_fps / max(config.PERSON_GATE_FPS, 0.1))) \
+        if gate_runner is not None else 1
 
     batch: list[np.ndarray] = []
 
@@ -113,6 +129,9 @@ def run_scan(
         t_infer = time.monotonic()
         results = detector.detect_frames(frames)
         infer_s += time.monotonic() - t_infer
+        if gate_runner is not None:
+            gate_runner.feed_batch(frames, first_idx, eff_fps, gate_stride)
+            gate_runner.sync()
         for j, dets in enumerate(results):
             idx = first_idx + j
             t = idx / eff_fps
@@ -141,6 +160,12 @@ def run_scan(
             if weak:
                 top_label = max(weak, key=weak.get)
                 weak_raw.append((t, weak[top_label], top_label))
+            # person-gate proxy evidence: a NudeNet body-part detection
+            # (any non-trigger class) means somebody is there
+            if any(det.label in config.PERSON_GATE_PROXY_LABELS
+                   and det.score >= config.PERSON_GATE_PROXY_SCORE
+                   for det in dets):
+                proxy_pts.append(round(t, 3))
             for det in dets:
                 label_stats[det.label] += 1
 
@@ -182,6 +207,28 @@ def run_scan(
             if bo and seg["start"] <= t <= seg["end"])
     timeline = bin_timeline(trig_flags, ts, duration)
 
+    # person gate: join the side stream and smooth presence into ranges
+    # (fail-open: runner errors return None ranges = whole timeline)
+    if gate_runner is not None:
+        person_ranges, gate_stats = gate_runner.finish(duration)
+    else:
+        person_ranges, gate_stats = None, {
+            "enabled": bool(arbiter), "reason": "disabled" if not arbiter
+            else "person gate off"}
+
+    # stage C: crowd timestamps (CringeMDB, opt-in, fail-soft) — merged
+    # BEFORE the arbiter: crowd ranges are TRUSTED (blur-final), so the
+    # VLM must not spend frames inside them either. Union-merge only:
+    # community ranges can never remove model-found segments.
+    crowd_block: Optional[dict] = None
+    if crowd:
+        crowd_block = fetch_crowd_segments(
+            Path(video_path).name, title=crowd_title, year=crowd_year,
+            categories=config.CROWD_CATEGORIES, pad_s=config.CROWD_PAD_S,
+            cache_dir=Path(config.CROWD_CACHE_DIR))
+        if crowd_block["segments"]:
+            segments = merge_crowd_segments(segments, crowd_block)
+
     # stage B: sparse VLM arbitration (opt-in; failure never fails the scan)
     # weak hits: cluster sub-threshold trigger bursts (<=2s gap) to their
     # peak sample, capped by striding — each peak is one targeted VLM frame.
@@ -205,9 +252,10 @@ def run_scan(
             video_path, duration, segments, smoothing=smoothing,
             model_id=arbiter_model, mode=arbiter_mode,
             weak_hits=[t for t, _, _ in weak_peaks],
-            companion_hits=companions)
+            companion_hits=companions,
+            person_ranges=person_ranges, person_points=proxy_pts)
         # apply-mode is ADD-ONLY: VLM-found blind-spot segments merge in,
-        # but detector-flagged segments are never removed on VLM
+        # but trusted (detector/crowd) segments are never removed on VLM
         # non-confirmation — measured Qwen3-VL behavior on dim scenes is
         # false negatives, and auto-removal would systematically eat them.
         if (arbiter_mode == "apply" and not arbiter_block.get("error")
@@ -215,18 +263,6 @@ def run_scan(
             pre = [dict(s) for s in segments]
             segments = _apply_arbiter(segments, arbiter_block)
             arbiter_block["segments_pre_arbiter"] = pre
-
-    # stage D: crowd timestamps (CringeMDB, opt-in, fail-soft) — merged
-    # AFTER the arbiter so community ranges can never remove model-found
-    # segments, only extend coverage. Same Stage C treatment downstream.
-    crowd_block: Optional[dict] = None
-    if crowd:
-        crowd_block = fetch_crowd_segments(
-            Path(video_path).name, title=crowd_title, year=crowd_year,
-            categories=config.CROWD_CATEGORIES, pad_s=config.CROWD_PAD_S,
-            cache_dir=Path(config.CROWD_CACHE_DIR))
-        if crowd_block["segments"]:
-            segments = merge_crowd_segments(segments, crowd_block)
 
     bridged_total = sum(bridge_only)
     wall = time.monotonic() - t0
@@ -261,6 +297,7 @@ def run_scan(
                 1 for s in segments if s.get("bridged_samples")),
         } if track else {"enabled": False, "bridged_samples": 0},
         "arbiter": arbiter_block,
+        "person_gate": gate_stats,
         "crowd": crowd_block,
         "wall_time_s": round(wall, 2),
         "infer_time_s": round(infer_s, 2),

@@ -152,6 +152,24 @@ def persons_union(outs: dict, in_names_map: dict, h0: int, w0: int,
     return union
 
 
+def person_presence(outs: dict, in_names_map: dict,
+                    det_thr: float = PERSON_DETECT_THRESHOLD
+                    ) -> tuple[bool, float]:
+    """Raw outputs -> (person_present, max_person_score). Pure.
+
+    Unlike decode()/persons_union() (global top-k over all classes, then
+    keep person), this takes the max over the person column directly —
+    a presence gate wants recall: a person scoring below the global
+    top-k cut still counts. No boxes, no masks — the gate only asks
+    'is anybody here'."""
+    logits = np.asarray(outs[in_names_map["labels"]], dtype=np.float32)
+    _, n_q, n_c = logits.shape
+    prob = 1.0 / (1.0 + np.exp(
+        -logits.reshape(n_q, n_c)[:, PERSON_CLASS]))
+    mx = float(prob.max())
+    return mx >= det_thr, mx
+
+
 class PersonSegmenter:
     """person mask for an explicit-part box, via TRT FP32.
 
@@ -270,3 +288,38 @@ class PersonSegmenter:
                  ("masks", self._names["masks"]))}
         return persons_union(outs, {"dets": "dets", "labels": "labels",
                                     "masks": "masks"}, h0, w0)
+
+    # -- scan-time presence gate --------------------------------------------
+    def presence(self, frame_rgb: np.ndarray,
+                 det_thr: float | None = None) -> tuple[bool, float]:
+        """Synchronous person-presence check (gate path; no masks)."""
+        from . import config as _config
+
+        thr = _config.PERSON_GATE_SCORE if det_thr is None else det_thr
+        blob = preprocess(frame_rgb, self.resolution)
+        if self.backend_name == "ort":
+            outs = {"labels": self.ort.sess.run(
+                None, {self.ort.input_name: blob})[1]}
+        else:
+            torch = self._torch
+            t = torch.from_numpy(blob).to(self.engine.device)
+            raw = self.engine.run({self.engine.in_names[0]: t})
+            outs = {"labels": raw[self._names["labels"]].float().cpu().numpy()}
+        return person_presence(outs, {"labels": "labels"}, thr)
+
+    def presence_enqueue(self, frame_rgb: np.ndarray,
+                         stream) -> tuple["object", str]:
+        """Async gate pass on `stream`: enqueues without syncing.
+
+        -> (labels_tensor_on_device, labels_output_name). The caller owns
+        the join (stream.synchronize()) and then converts:
+            numpy = tensor.float().cpu().numpy()
+            person_presence({"labels": numpy}, {"labels": name}, thr)
+        Preprocess (CPU) happens here; only H2D + the engine run land on
+        the side stream, so the NudeNet engine's stream keeps flowing."""
+        blob = preprocess(frame_rgb, self.resolution)
+        torch = self._torch
+        with torch.cuda.stream(stream):
+            t = torch.from_numpy(blob).to(self.engine.device)
+            raw = self.engine.run({self.engine.in_names[0]: t}, sync=False)
+        return raw[self._names["labels"]], self._names["labels"]

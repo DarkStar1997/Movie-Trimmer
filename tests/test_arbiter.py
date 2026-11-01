@@ -16,14 +16,16 @@ from scanner.temporal import SmoothingConfig
 
 # --- planning --------------------------------------------------------------------
 
-def test_plan_verify_frames_inside_segments():
+def test_plan_never_samples_inside_segments():
+    """Trusted-source policy: detector/crowd segments are blur-final; the
+    VLM never looks inside them (verify frames removed with the policy)."""
     segs = [{"start": 100.0, "end": 110.0}, {"start": 300.0, "end": 310.0}]
     planned = plan_frames(600.0, segs)
-    verify = [f for f in planned if f.reason == "verify"]
-    assert len(verify) == 6                      # 3 per segment
-    for f in verify:
-        seg = segs[f.seg_idx]
-        assert seg["start"] <= f.t <= seg["end"]
+    assert planned
+    assert not any(f.reason == "verify" for f in planned)
+    for f in planned:
+        for a, b in [(100, 110), (300, 310)]:
+            assert not a < f.t < b, f.t
 
 
 def test_plan_windows_outside_segments():
@@ -56,15 +58,15 @@ def test_plan_sweep_covers_blind_spots():
 
 
 def test_plan_respects_cap_by_thinning_not_truncating():
-    # 30 segments x 3 verify = 90 verify + windows + sweep, cap 150
+    # 30 segments -> dense windows + 61-point sweep, uncapped well over 150
     segs = [{"start": 10.0 + i * 20.0, "end": 14.0 + i * 20.0}
             for i in range(30)]
-    planned = plan_frames(600.0, segs, max_frames=150)
-    assert len(planned) <= 150
-    verify = [f for f in planned if f.reason == "verify"]
-    assert len(verify) == 90                     # verify tier always kept
+    planned_u = plan_frames(600.0, segs, max_frames=0)
+    planned_c = plan_frames(600.0, segs, max_frames=150)
+    assert len(planned_c) <= 150 < len(planned_u)
+    assert not any(f.reason == "verify" for f in planned_c)
     # thinned windows must still span the whole movie, not just its start
-    win = [f.t for f in planned if f.reason == "window"]
+    win = [f.t for f in planned_c if f.reason == "window"]
     assert win and max(win) > 400.0
 
 
@@ -81,13 +83,63 @@ def test_plan_sweep_keeps_guaranteed_budget_share():
     # sparse segments: windows cover only their 45s afterglow, leaving the
     # second half of the movie as true blind spots for the sweep
     segs = [{"start": 100.0 + i * 55.0, "end": 104.0 + i * 55.0}
-            for i in range(20)]                    # 20 segs x 3 = 60 verify
+            for i in range(20)]
     planned = plan_frames(3600.0, segs, sweep_every_s=15.0, max_frames=300,
                           sweep_budget_frac=0.5)
     assert len(planned) <= 300
     sweep = [f for f in planned if f.reason == "sweep"]
-    # budget after verify = 240; sweep share = min(240, int(300*0.5)) = 150
+    # kept=0 (no verify tier); sweep share = min(300, int(300*0.5)) = 150
     assert len(sweep) == 150
+
+
+# --- person gate -------------------------------------------------------------------
+
+def test_plan_person_gate_limits_sweep_and_windows():
+    """Person ranges (RF-DETR) are where the VLM may look: sweep frames
+    only inside them, window frames only inside them, never elsewhere."""
+    segs = [{"start": 100.0, "end": 110.0}]
+    planned = plan_frames(600.0, segs, person_ranges=[(200.0, 260.0)])
+    sweep = [f for f in planned if f.reason == "sweep"]
+    assert len(sweep) == 7                    # grid 200,210,...,260
+    for f in planned:
+        if f.reason in ("sweep", "window"):
+            assert 200.0 <= f.t <= 260.0, f.t
+    assert planned                             # and nothing else planned
+
+
+def test_plan_person_gate_off_covers_whole_timeline():
+    """person_ranges=None (gate disabled or failed open): every 10s tick
+    outside trusted segments is planned — the pre-gate behavior."""
+    segs = [{"start": 100.0, "end": 110.0}]
+    planned = plan_frames(600.0, segs, person_ranges=None)
+    sweep = [f.t for f in planned if f.reason == "sweep"]
+    assert any(t < 100.0 for t in sweep)
+    assert any(t > 300.0 for t in sweep)
+
+
+def test_plan_person_points_open_gate_at_instants():
+    """NudeNet proxy-class hits (body-part detections) are person
+    evidence: the gate opens at those exact instants."""
+    planned = plan_frames(600.0, [], person_ranges=[(100.0, 110.0)],
+                          person_points=[400.0])
+    ts = [f.t for f in planned if f.reason == "sweep"]
+    assert 100.0 in ts and 110.0 in ts and 400.0 in ts
+    assert not any(120.0 <= t <= 390.0 for t in ts)
+
+
+def test_plan_uncapped_is_the_default_posture():
+    """max_frames=0: no thinning — identical to a cap larger than the plan.
+    (Grid ticks landing in edge-windows carry the window reason — the
+    collision is ancient; the invariant is that nothing is dropped.)"""
+    segs = [{"start": 10.0 + i * 20.0, "end": 14.0 + i * 20.0}
+            for i in range(30)]
+    planned_u = plan_frames(600.0, segs, max_frames=0)
+    planned_huge = plan_frames(600.0, segs, max_frames=10_000)
+    assert planned_u == planned_huge
+    assert len(planned_u) > 150
+    # and every frame is outside the trusted segments
+    for f in planned_u:
+        assert not any(s["start"] < f.t < s["end"] for s in segs)
 
 
 def test_plan_sweep_spans_whole_movie_when_capped():

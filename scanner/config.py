@@ -83,6 +83,13 @@ DEFAULT_REVIEW_LABELS: dict[str, float] = {
 # TVs, tiny far-away figures).
 DEFAULT_MIN_BOX_AREA_FRAC = 0.005
 
+# Person-gate proxy classes: every NudeNet class that is NOT an explicit
+# trigger is body-part/person evidence (faces, *_COVERED, belly, feet,
+# armpits) — hits >= PERSON_GATE_PROXY_SCORE open the arbiter gate at
+# that instant even where RF-DETR sees nobody.
+PERSON_GATE_PROXY_LABELS = tuple(
+    l for l in NUDENET_LABELS if l not in DEFAULT_TRIGGER_LABELS)
+
 # --- Temporal smoothing defaults ---------------------------------------------
 # (see temporal.SmoothingConfig docstring for semantics)
 DEFAULT_SMOOTHING = {
@@ -111,6 +118,23 @@ DEFAULT_TRACK = True
 TRACK_EXPLICIT_HOLD_S = 8.0
 TRACK_REFRESH_FLOOR = 0.15    # sub-trigger explicit score that still refreshes
 TRACK_MAX_LOST_SAMPLES = 3    # coasting samples (~0.75s @4fps) before retirement
+
+# --- Stage A2: RF-DETR person gate (arbiter pre-filter) -------------------------
+# Trusted-source policy: NudeNet detector segments and crowd ranges are
+# blur-final regardless of VLM opinion (apply mode is add-only), so the
+# VLM never samples INSIDE them. And a frame with no person cannot host
+# explicit content, so the VLM sweep only runs where RF-DETR medium sees
+# somebody (PERSON_GATE_*), OR where NudeNet itself fired a body-part
+# class (proxy points — *_COVERED / FACE_* / review classes are person
+# evidence, free at 4fps). FAIL-OPEN: any gate failure = full sweep.
+PERSON_GATE_ENABLED = bool(
+    int(os.environ.get("PERSON_GATE_ENABLED", "1")))
+PERSON_GATE_FPS = float(os.environ.get("PERSON_GATE_FPS", "2.0"))
+PERSON_GATE_SCORE = float(os.environ.get("PERSON_GATE_SCORE", "0.25"))
+PERSON_GATE_OPEN_SAMPLES = 2    # person persists 1s @2fps to open a range
+PERSON_GATE_CLOSE_GAP_SAMPLES = 4   # 2s absent closes it (brief occlusion)
+PERSON_GATE_PROXY_SCORE = float(
+    os.environ.get("PERSON_GATE_PROXY_SCORE", "0.30"))
 
 # --- Stage C: person segmentation + blur render --------------------------------
 # RF-DETR Seg Medium (COCO person class only at runtime; FP32 TRT engine).
@@ -165,29 +189,29 @@ CROWD_CACHE_DIR = os.environ.get(
         / "crowd_cache"))
 
 # --- Stage B: VLM arbiter (sparse Qwen3-VL pass) -------------------------------
-# Never every frame: verify N frames per final segment, sample windows around
-# segments (flicker gaps / short continuations), plus a coarse global sweep for
-# true blind spots — capped at ARBITER_MAX_FRAMES per movie.
+# Never every frame: the person-gated sweep (10s grid where RF-DETR sees
+# a person, outside trusted NudeNet/crowd ranges), windows hugging trusted
+# edges, weak/companion/proxy NudeNet triggers — uncapped by default
+# (ARBITER_MAX_FRAMES > 0 re-enables striding caps).
 DEFAULT_ARBITER = False
 # Bare name resolved against VLM_DIR first (baked weights); an HF repo id
 # also works on a networked host (the container runs offline by design).
 DEFAULT_ARBITER_MODEL = "Qwen3-VL-8B-Instruct"
-ARBITER_VERIFY_FRAMES = 3       # per segment, at 20/50/80% of its span
 ARBITER_WINDOW_BEFORE_S = 10.0  # sampled before each segment start
 ARBITER_WINDOW_AFTER_S = 45.0   # sampled after each segment end
 ARBITER_WINDOW_STEP_S = 1.0     # sample spacing inside windows
 ARBITER_SWEEP_EVERY_S = float(os.environ.get("ARBITER_SWEEP_EVERY_S", "10.0"))
-ARBITER_MAX_FRAMES = int(os.environ.get("ARBITER_MAX_FRAMES", "1100"))
-# The sweep is the ONLY global blind-spot coverage and used to lose the
-# budget race entirely (47 segments: verify 141 + windows left ~9 sweep
-# frames for a 108-min movie). It now gets a guaranteed share of the cap;
-# windows refine around known segments with the remainder.
+# 0 (default) = uncapped; >0 = hard cap, applied by striding not truncation
+ARBITER_MAX_FRAMES = int(os.environ.get("ARBITER_MAX_FRAMES", "0"))
+# Share of the cap reserved for the sweep when a cap is set — windows
+# refine around known segments and historically starved the sweep.
 ARBITER_SWEEP_BUDGET_FRAC = float(
     os.environ.get("ARBITER_SWEEP_BUDGET_FRAC", "0.6"))
 # A sweep hit is a POINT sample of a scene of unknown extent (window hits
 # sit on a 1s grid, so 1.5s pad finds their edges; sweep hits do not).
-# Pad each sweep hit by this much when clustering into new segments.
-ARBITER_SWEEP_PAD_S = float(os.environ.get("ARBITER_SWEEP_PAD_S", "8.0"))
+# Pad each sweep hit by this much when clustering into new segments, and
+# re-measure its neighborhood at 1s density (expansion pass).
+ARBITER_SWEEP_PAD_S = float(os.environ.get("ARBITER_SWEEP_PAD_S", "10.0"))
 # Sub-threshold NudeNet trigger hits (score in [ARBITER_WEAK_MIN_SCORE,
 # the label's trigger threshold)) never reach smoothing, but in the dim/
 # distant blind-spot region they are the detector's only voice (Ex Machina
@@ -204,7 +228,12 @@ ARBITER_WEAK_MAX_FRAMES = int(
 # Capped; highest-confidence hits expand first.
 ARBITER_EXPAND_MAX_FRAMES = int(
     os.environ.get("ARBITER_EXPAND_MAX_FRAMES", "96"))
-ARBITER_MODES = ("verify", "apply")  # verify: annotate; apply: also merge/remove
+ARBITER_MODES = ("verify", "apply")  # verify: annotate; apply: also merge
+# apply is the default: merging is add-only (VLM can never remove a
+# NudeNet/crowd segment), and a submission that forgets the mode must
+# never silently drop the VLM's found segments again (the verify-default
+# trap, which cost a full day of debugging — see design doc).
+DEFAULT_ARBITER_MODE = os.environ.get("DEFAULT_ARBITER_MODE", "apply")
 ARBITER_FRAME_W = 1024          # extraction width for VLM frames
 # Off-box arbiter: when ARBITER_BASE_URL is set (e.g. a llama-server
 # sidecar speaking the OpenAI /v1/chat/completions API), judgments go

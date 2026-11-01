@@ -881,6 +881,60 @@ submission. Lesson recorded: when a stage's output vanishes, diff the
 *recorded request parameters* first — the answer was in the JSON the
 whole time.
 
+## 11. Trusted-source arbiter + RF-DETR person gate (2026-11-02)
+
+The planner was redesigned around one principle: **spend the VLM only
+where it can change the outcome.**
+
+- **Trusted sources.** NudeNet detector segments and crowd (CringeMDB)
+  ranges are blur-final regardless of VLM opinion — apply mode is
+  add-only, so verification there was informational only. The planner
+  now NEVER samples inside them, and the crowd fetch moved BEFORE the
+  arbiter so its ranges join the trusted set (union-merge semantics
+  unchanged; community ranges still can never remove model segments).
+  The per-segment verify frames (3/segment at 20/50/80%) are deleted;
+  `segment_verdicts` in new scans are all-zero as a result.
+- **Person gate.** A frame with no person cannot host explicit content.
+  Stage A2 runs the existing RF-DETR Seg Medium engine (the blur-time
+  person segmenter — no new model) as a presence detector at 2fps,
+  piggybacked on the detector's decode stream on its OWN CUDA stream
+  (`TrtEngine.run(sync=False)` + a per-batch join), so the two TRT
+  engines overlap instead of serializing. Per-sample presence
+  (max sigmoid over the person class column — deliberately NOT the
+  global top-k path, which can crowd out a low person score) is
+  hysteresis-smoothed into person_ranges (open: 1s of continuous
+  presence; close: 2s absent). The sweep and edge-windows only fire
+  where a person is present; NudeNet proxy classes (`FACE_*`,
+  `*_COVERED`, belly/feet/armpits — free at 4fps, previously discarded)
+  open the gate at their instants; weak/companion triggers stay
+  ungated; the ±10s expansion pass is ungated (a confirmed hit measures
+  its neighborhood even across a gate miss). `ARBITER_SWEEP_PAD_S`
+  8→10.
+- **Uncapped.** `ARBITER_MAX_FRAMES` defaults to 0 = unlimited (a cap,
+  if set, still thins by striding). With the person gate filtering,
+  frames land only in plausible territory, so the cap's protection
+  against window explosion is unnecessary in the default posture.
+- **Fail-open.** Any gate failure (engine init, mid-pass error) yields
+  `person_ranges=None` = the whole timeline is eligible — exactly the
+  pre-gate planner. A gate problem costs VLM time, never coverage.
+- **`arbiter_mode` defaults to `apply`.** With verify frames gone,
+  verify mode is empty work (it runs the whole sweep and discards the
+  findings); a bare `-F arbiter=true` submission now means full
+  coverage, closing the trap in §10 permanently.
+
+CUDA graphs were considered for the two-engine overlap and rejected
+with measurements: at 4fps/2fps the per-frame budget is ~250ms against
+millisecond kernels — the stage is decode-bound, not launch-bound
+(56% GPU / 60-84% NVDEC during the detector pass). Graphs would buy
+nothing measurable at scan cadence and cost capture complexity; noted
+here so the idea isn't re-litigated without a profile.
+
+Validation on Gone Girl: see the scan JSON `person_gate` block
+(ranges, coverage fraction, threshold, backend) and
+`arbiter.planned_by_reason`; the gate-recall audit asserts every
+explicit frame the baseline arbiter found lies inside detected person
+ranges.
+
 
 
 

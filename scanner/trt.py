@@ -238,10 +238,16 @@ class TrtEngine:
                     raise
 
     # -- inference -----------------------------------------------------------
-    def run(self, inputs: dict[str, "object"], stream=None) -> dict:
+    def run(self, inputs: dict[str, "object"], stream=None,
+            sync: bool = True) -> dict:
         """One async v3 pass. Values: torch tensors on device. Returns torch
         output tensors keyed by output name (fresh buffers per call — batch
-        sizes vary across the scan, reuse would complicate the caller)."""
+        sizes vary across the scan, reuse would complicate the caller).
+
+        sync=False leaves the pass in flight on its stream: the caller owns
+        the join (stream/event synchronize) BEFORE consuming the returned
+        buffers. Used by the scan-time person gate to overlap the RF-DETR
+        engine with the NudeNet engine on separate streams."""
         import torch
 
         trt = self._trt
@@ -260,5 +266,6 @@ class TrtEngine:
                 self.context.set_tensor_address(nm, buf.data_ptr())
                 outputs[nm] = buf
             self.context.execute_async_v3(current.cuda_stream)
-            current.synchronize()
+            if sync:
+                current.synchronize()
         return outputs

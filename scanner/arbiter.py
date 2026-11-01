@@ -11,14 +11,21 @@ Structure (pure functions first, heavy runner last):
                    -> aggregate. torch/transformers import happens HERE only,
                    so the module is importable in the torch-free host venv.
 
-Planning policy (see config):
-  - verify: ARBITER_VERIFY_FRAMES per final segment (20/50/80% of its span)
-  - window: ~1fps sampling in the gaps hugging segments (before starts, after
-    ends) — flicker continuations and near-miss boundaries live there
-  - sweep: one frame per ARBITER_SWEEP_EVERY_S across the whole movie for true
-    blind spots, thinned to whatever frame budget remains
-  - hard cap ARBITER_MAX_FRAMES, thinned by striding (never truncated to only
-    the early part of the movie)
+Planning policy (trusted sources + person gate; see config):
+  - trusted: NudeNet detector segments + crowd ranges are blur-final
+    regardless of VLM opinion (apply mode is add-only) — NEVER sampled
+  - person gate: the RF-DETR pass (scanner/persongate.py) marks where
+    anybody is on screen; NudeNet proxy-class hits (body-part
+    detections) open the gate at their instants. Gate off/failed =
+    whole timeline eligible (fail-open)
+  - window: ~1fps sampling in the gaps hugging trusted edges (before
+    starts, after ends) — flicker continuations and near-miss
+    boundaries live there; person-gated
+  - sweep: one frame per ARBITER_SWEEP_EVERY_S across person-present,
+    nothing-trusted timeline — the blind-spot backbone
+  - weak/companion: NudeNet sub-threshold/orphan triggers, ungated
+  - ARBITER_MAX_FRAMES <= 0 (default): uncapped; a cap thins by striding
+    (never truncated to only the early part of the movie)
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,7 +51,6 @@ logger = logging.getLogger(__name__)
 
 # priority tiers for the frame budget
 PRIO_WEAK = 4
-PRIO_VERIFY = 3
 PRIO_WINDOW = 2
 PRIO_SWEEP = 1
 
@@ -102,7 +109,8 @@ class PlannedFrame:
 
 
 def plan_frames(duration: float, segments: list[dict], *,
-                verify_frames: int = config.ARBITER_VERIFY_FRAMES,
+                person_ranges: list[tuple[float, float]] | None = None,
+                person_points: list[float] = (),
                 window_before_s: float = config.ARBITER_WINDOW_BEFORE_S,
                 window_after_s: float = config.ARBITER_WINDOW_AFTER_S,
                 window_step_s: float = config.ARBITER_WINDOW_STEP_S,
@@ -113,7 +121,18 @@ def plan_frames(duration: float, segments: list[dict], *,
                 weak_max: int = config.ARBITER_WEAK_MAX_FRAMES,
                 companion_hits: list[float] = (),
                 ) -> list[PlannedFrame]:
-    """Curate the sparse VLM frame list, capped by striding not truncating."""
+    """Curate the sparse VLM frame list.
+
+    Trusted-source policy: `segments` here are NudeNet-detector + crowd
+    ranges, blur-final regardless of VLM opinion (apply mode is
+    add-only) — the VLM NEVER samples inside them. It watches only where
+    they don't fire AND (person gate) where somebody is present:
+    `person_ranges` from the RF-DETR pass (None = gate off or failed
+    open — the whole timeline is eligible), plus `person_points` (NudeNet
+    proxy-class hits: a body-part detection is person evidence and opens
+    the gate at that instant). Weak/companion triggers stay ungated —
+    they carry their own detector evidence. max_frames <= 0 = uncapped;
+    a cap is applied by striding, never truncation."""
     if duration <= 0:
         return []
     planned: dict[float, PlannedFrame] = {}   # rounded t -> frame (max prio)
@@ -132,9 +151,20 @@ def plan_frames(duration: float, segments: list[dict], *,
     def in_segment(t: float) -> bool:
         return any(a <= t <= b for a, b in seg_bounds)
 
+    gate_bounds = list(person_ranges) if person_ranges is not None else None
+    gate_pts = {round(float(t), 3) for t in person_points}
+
+    def person_present(t: float) -> bool:
+        if gate_bounds is None:
+            return True                    # gate off / failed open
+        if round(t, 3) in gate_pts:
+            return True                    # NudeNet proxy-class evidence
+        return any(a <= t <= b for a, b in gate_bounds)
+
     # 0) weak detector hits: targeted, few, highest value per frame —
     #    sub-threshold trigger scores the VLM gets to arbitrate (skipped
-    #    when the moment already sits inside a flagged segment)
+    #    when the moment already sits inside a trusted segment). Ungated:
+    #    the detector firing IS person evidence.
     for t in weak_hits:
         if not in_segment(t):
             add(t, PRIO_WEAK, "weak")
@@ -147,21 +177,16 @@ def plan_frames(duration: float, segments: list[dict], *,
         if not in_segment(t):
             add(t, PRIO_WEAK, "companion")
 
-    # 1) verification frames inside segments (keep out of the 0.5s edges)
-    fracs = [0.2, 0.5, 0.8][:verify_frames] or [0.5]
-    for i, (a, b) in enumerate(seg_bounds):
-        span = b - a
-        for f in fracs:
-            add(a + span * f, PRIO_VERIFY, "verify", seg_idx=i,
-                margin=0.0 if span > 1.0 else 0.0)
-
-    # 2) windows hugging segments (never inside one)
+    # 1) windows hugging trusted segments (never inside one): their edges
+    #    are where scene spill lives — starts that begin early, ends that
+    #    run late. Person-gated: an empty hallway after a segment end
+    #    cannot host explicit content.
     for i, (a, b) in enumerate(seg_bounds):
         prev_end = seg_bounds[i - 1][1] if i > 0 else 0.0
         w0 = max(a - window_before_s, prev_end)
         t = a - window_step_s
         while t > w0:
-            if not in_segment(t):
+            if not in_segment(t) and person_present(t):
                 add(t, PRIO_WINDOW, "window")
             t -= window_step_s
         next_start = seg_bounds[i + 1][0] if i + 1 < len(seg_bounds) \
@@ -169,41 +194,48 @@ def plan_frames(duration: float, segments: list[dict], *,
         w1 = min(b + window_after_s, next_start)
         t = b + window_step_s
         while t < w1:
-            if not in_segment(t):
+            if not in_segment(t) and person_present(t):
                 add(t, PRIO_WINDOW, "window")
             t += window_step_s
 
-    # 3) global sweep for blind spots
+    # 2) global sweep for blind spots — the person-gated backbone: every
+    #    sweep_every_s of timeline where a person is present and nothing
+    #    is trusted
     k = 0.0
     while k <= duration:
-        if not in_segment(k):
+        if not in_segment(k) and person_present(k):
             add(k, PRIO_SWEEP, "sweep")
         k += sweep_every_s
 
-    # --- budget: weak + verify always; sweep guaranteed a share; windows
-    # the rest (weak first: targeted frames, capped tightly upstream) ---
+    # --- budget: weak + companions always; sweep guaranteed a share; windows
+    # the rest (weak first: targeted frames, capped tightly upstream).
+    # max_frames <= 0 = UNCAPPED: every planned frame is judged. ---
+    capped = max_frames > 0
     frames = list(planned.values())
     by_reason: dict[str, list[PlannedFrame]] = {}
     for f in sorted(frames, key=lambda f: f.t):
         by_reason.setdefault(f.reason, []).append(f)
 
-    def thin(items: list[PlannedFrame], budget: int) -> list[PlannedFrame]:
-        if len(items) <= budget or budget <= 0:
-            return items if budget > 0 else []
+    def thin(items: list[PlannedFrame],
+             budget: int | None) -> list[PlannedFrame]:
+        if budget is None or len(items) <= budget:
+            return items
         step = len(items) / budget
         return [items[int(i * step)] for i in range(budget)]
 
-    kept = thin(by_reason.get("weak", []), min(weak_max, max_frames))
+    kept = thin(by_reason.get("weak", []),
+                min(weak_max, max_frames) if capped else weak_max)
     kept += thin([f for f in by_reason.get("companion", [])
                   if f.t not in {k.t for k in kept}],
-                 min(2 * weak_max, max_frames - len(kept)))
-    kept += thin(by_reason.get("verify", []), max_frames - len(kept))
-    budget = max_frames - len(kept)
+                 min(2 * weak_max, max_frames - len(kept))
+                 if capped else 2 * weak_max)
+    budget = (max_frames - len(kept)) if capped else None
     # sweep BEFORE windows: it is the only global coverage and loses the
     # budget race otherwise (windows hug already-flagged segments)
     sweeps = thin(by_reason.get("sweep", []),
-                  min(budget, int(max_frames * sweep_budget_frac)))
-    budget -= len(sweeps)
+                  min(budget, int(max_frames * sweep_budget_frac))
+                  if capped else None)
+    budget = (budget - len(sweeps)) if capped else None
     windows = thin(by_reason.get("window", []), budget)
 
     out = sorted(kept + windows + sweeps, key=lambda f: f.t)
@@ -651,17 +683,29 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
                 mode: str = "verify",
                 weak_hits: list[float] = (),
                 companion_hits: list[float] = (),
+                person_ranges: list[tuple[float, float]] | None = None,
+                person_points: list[float] = (),
                 workdir: Path | None = None) -> dict:
-    """Full sparse arbitration pass. Never raises: returns an error block."""
+    """Full sparse arbitration pass. Never raises: returns an error block.
+
+    `segments` are the TRUSTED ranges (NudeNet detector + crowd): never
+    sampled inside. `person_ranges` gates the sweep/windows (None = gate
+    off or failed open = whole timeline). `person_points` are NudeNet
+    proxy-class hit times — body-part evidence that opens the gate."""
     t0 = time.monotonic()
     result: dict = {"model": model_id, "mode": mode, "frames_checked": 0,
                     "refusals": 0, "segment_verdicts": [], "new_segments": [],
                     "rejected_segments": [], "error": None}
     workdir = workdir or Path(config.SCAN_WORKSPACE_DIR) / "arbiter"
     try:
-        planned = plan_frames(duration, segments, weak_hits=list(weak_hits),
+        planned = plan_frames(duration, segments,
+                              person_ranges=person_ranges,
+                              person_points=person_points,
+                              weak_hits=list(weak_hits),
                               companion_hits=list(companion_hits))
         result["planned_frames"] = len(planned)
+        result["planned_by_reason"] = dict(
+            Counter(f.reason for f in planned))
         if not planned:
             result["wall_time_s"] = round(time.monotonic() - t0, 2)
             return result

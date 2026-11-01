@@ -76,7 +76,7 @@ async def submit_scan(
     track: bool = Form(config.DEFAULT_TRACK),
     arbiter: bool = Form(config.DEFAULT_ARBITER),
     arbiter_model: str = Form(config.DEFAULT_ARBITER_MODEL),
-    arbiter_mode: str = Form("verify"),
+    arbiter_mode: str = Form(config.DEFAULT_ARBITER_MODE),
     crowd: bool = Form(config.DEFAULT_CROWD),
     crowd_title: str | None = Form(None),
     crowd_year: int | None = Form(None),

@@ -47,7 +47,7 @@ async def run_scan_job(scan_id: str, video_path: str,                       poli
                        workspace: Optional[Path] = None, *,
                        track: bool = True, arbiter: bool = False,
                        arbiter_model: Optional[str] = None,
-                       arbiter_mode: str = "verify",
+                       arbiter_mode: str = config.DEFAULT_ARBITER_MODE,
                        crowd: bool = False,
                        crowd_title: Optional[str] = None,
                        crowd_year: Optional[int] = None) -> None:
