@@ -48,7 +48,9 @@ from __future__ import annotations
 import bisect
 import json
 import logging
+import os
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -76,6 +78,40 @@ def probe_fps_fraction(path: str) -> str:
 def probe_fps(path: str) -> float:
     num, den = probe_fps_fraction(path).split("/")
     return float(num) / float(den)
+
+
+def probe_pix_fmt(path: str) -> str:
+    """Source pixel format, e.g. 'yuv420p' (8-bit) or 'yuv420p10le' (10-bit)."""
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
+           "-show_entries", "stream=pix_fmt", "-of", "json", path]
+    out = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return json.loads(out.stdout)["streams"][0]["pix_fmt"]
+
+
+def count_subtitle_streams(path: str) -> int:
+    """Subtitle stream count in the container (0 for none)."""
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "s",
+           "-show_entries", "stream=index", "-of", "json", path]
+    out = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return len(json.loads(out.stdout).get("streams", []))
+
+
+def strip_subtitles(path: str, workdir: str) -> str:
+    """Sub-free stream-copy of the source (video+audio bit-exact) for the
+    GPU render: PyNvVideoCodec's muxer cannot carry subtitle streams over —
+    the MP4 muxer EINVALs at header write and the MKV muxer segfaults (a
+    45-track SRT WEBRip found both). Subtitles are dropped from blur
+    outputs."""
+    fd, tmp = tempfile.mkstemp(suffix=".mkv", dir=workdir)
+    os.close(fd)
+    try:
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", path,
+                        "-map", "0:v:0", "-map", "0:a", "-c", "copy",
+                        "-sn", "-dn", tmp], check=True)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    return tmp
 
 
 # --- pure helpers (host-testable) ------------------------------------------------
@@ -506,8 +542,16 @@ def run_blur(video_path: str, segments: list[dict], out_path: str, *,
                              aw, ah, window, cq=cq, pixels=pixels)
     else:
         from .gpu_render import render_gpu
-        render = render_gpu(video_path, out_path, segments, per_seg,
-                            w, h, aw, ah, cq=cq, pixels=pixels)
+        # subtitle-bearing sources render from a sub-free copy (video+audio
+        # stay bit-exact; see strip_subtitles)
+        render_path = (strip_subtitles(video_path, Path(out_path).parent)
+                       if count_subtitle_streams(video_path) else video_path)
+        try:
+            render = render_gpu(render_path, out_path, segments, per_seg,
+                                w, h, aw, ah, cq=cq, pixels=pixels)
+        finally:
+            if render_path != video_path:
+                Path(render_path).unlink(missing_ok=True)
 
     dur = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",

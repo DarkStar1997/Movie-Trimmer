@@ -504,6 +504,47 @@ Cr128). Kill-switch: `BLUR_OVERLAY=0` env.
   visibly inadequate for 1080p film (trimmer ANALYSIS.md finding; CQ 26
   default here).
 
+### PyNvVideoCodec 2.2.3 on 10-bit HEVC + subtitle tracks (Gone Girl WEBRip, 2026-11-01)
+
+Every render before this movie was 8-bit H.264 MP4 without subtitle
+streams; Gone Girl (yuv420p10le MKV, 45 SRT tracks) exercised a chain of
+binding quirks, each isolated in throwaway-container probes:
+
+- **Encoder format is the string `"P010"`, not the `P016` enum.**
+  `CreateEncoder` rejects `P016.name` with "Unknown format" (supported:
+  NV12/YUV420/ARGB/ABGR/YUV444/P010/YUV444_10BIT/16BIT) even though the
+  NVDEC decoder *labels* its main10 surfaces `Pixel_Format.P016`. Same
+  memory layout both ways: Y + interleaved UV, uint16 words, samples
+  MSB-aligned (10-bit << 6 → word_max 65472, 8-bit levels lifted via
+  `v << 8`).
+- **The dlpack export is mislabeled**: the DecodedFrame exposes
+  `typestr |u1` with u16 geometry (shape 1620×1920, strides (1920, 2)),
+  so `torch.from_dlpack` yields a u16 tensor whose column stride is
+  wrong. `as_strided(t, (h*3/2, w), (w, 1))` fixes the word layout —
+  validated by a %64 alignment check (0.0 nonzero low bits ⇒ MSB-aligned
+  interpretation is exact).
+- **Encode() consumes its input via a POSITIONAL `__dlpack__(stream)`
+  call**; torch 2.14's `Tensor.__dlpack__` is keyword-only and raises
+  TypeError (and objects the binding can't sniff fall to the CPU-input
+  path: "incorrect usage of CPU input buffer"). A one-time
+  `Tensor.__dlpack__` bridge fixes the call signature. The input tensor
+  itself must be the u8 HWC view `(h*3/2, w, 2)` / strides `(2w, 2, 1)`
+  — the binding validates typestr and strides, and that view is exactly
+  what its P010 check expects: `surf.unsqueeze(-1).view(torch.uint8)`.
+- **The muxer cannot carry subtitle streams**: MP4 `FFmpegMuxer` EINVALs
+  at header write with them in the source context; the MKV muxer
+  segfaults outright. Fix (generic): when ffprobe sees subtitle streams,
+  render from a sub-free stream-copy (`-map 0:v:0 -map 0:a -c copy -sn`)
+  made next to the output and deleted after — video/audio stay
+  bit-exact; **subtitles are intentionally dropped from blur outputs**.
+- **The muxer's interleaver needs the passthrough audio traffic**: a
+  video-only mux (no `MuxPassthroughPacket` calls) writes a 48-byte
+  file with no moov even though `MuxVideoPacket` was called. The
+  production loop always passes audio through, but any future probe
+  must too.
+- End-to-end probe (sub-strip → NVDEC → as_strided → u16 pixelate → u8
+  view → NVENC P010 → mux) produces a playable `hevc, yuv420p10le` MP4.
+
 ### Numbers
 
 - Window render (25s window, 1 segment): analysis + render = 15-32s wall.
@@ -783,6 +824,21 @@ defines the pair (scanner + llama-server sidecar on one GPU,
 ARBITER_BASE_URL wiring, sidecar health-gated startup). The in-process
 transformers path remains as a generic env-switch fallback for hosts
 that mount weights into VLM_DIR.
+
+### All-in-one deployment (2026-11-01, later the same day)
+
+The pair collapsed into a single container: `allinone.Dockerfile`
+composes the published scanner image + the sidecar image's llama.cpp
+binaries and 30B-A3B weights, and `docker/allinone-entrypoint.sh` runs
+llama-server on 127.0.0.1 (health-gated before uvicorn starts — the
+same ordering the pair's `depends_on: service_healthy` gave, and the
+same VRAM budget: ~20.5GB model + ~2GB TRT engines of 24GB). The
+scanner reaches the arbiter at `ARBITER_BASE_URL=http://127.0.0.1:8082`.
+One `docker compose up -d` now runs the entire pipeline — scan →
+arbiter → crowd → GPU blur render; the two separate images stay
+published for hosts that want independent lifecycles. Trade-off
+accepted: a scanner crash now also reloads the model on container
+restart (the pair kept the sidecar warm through scanner restarts).
 
 
 

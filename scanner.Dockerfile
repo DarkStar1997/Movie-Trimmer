@@ -1,16 +1,17 @@
 # Scanner image: NudeNet ONNX -> TensorRT FP16, weights baked in from
 # ghcr.io/darkstar1997/movietrimmer-nudenet-weights; RF-DETR Seg Medium from
 # ghcr.io/darkstar1997/movietrimmer-rfdetr-seg-weights. The VLM arbiter is
-# NOT bundled: it runs as a llama-server sidecar (Qwen3-VL-30B-A3B MoE,
-# ghcr.io/darkstar1997/movie-trimmer-vlm-qwen3vl-30b-a3b) reached over
-# ARBITER_BASE_URL — see docker-compose.yml for the production pair.
+# NOT bundled: it runs as a llama-server sidecar (Qwen3-VL-30B-A3B MoE)
+# reached over ARBITER_BASE_URL.
 # NOTHING downloads at runtime: HF_HUB_OFFLINE=1 turns any accidental hub
 # access into a hard error. Engine cache is served by a bind mount.
 #
 # Build:
 #   docker build -f scanner.Dockerfile -t ghcr.io/darkstar1997/movie-trimmer-scanner:v1 .
-# Run the full stack (scanner + arbiter sidecar):
-#   docker compose up -d
+# Run the whole pipeline in ONE container (scanner + arbiter inside):
+#   docker compose up -d          # builds allinone.Dockerfile from this
+#                                 # image + the vlm sidecar image
+# (independent-lifecycle hosts can still run scanner + sidecar separately)
 #
 # Base matches the visiontouch/fitness-coach stack (torch 2.14.0 / CUDA 13.0).
 FROM ghcr.io/darkstar1997/movietrimmer-nudenet-weights:v1 AS weights

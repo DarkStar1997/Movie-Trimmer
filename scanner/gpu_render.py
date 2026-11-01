@@ -5,15 +5,16 @@ wrong (the stream-copy splice approach failed twice on ffmpeg's dts/pts
 cut semantics; this design removes the class of failure entirely):
 
     CreateDemuxer -> CreateDecoder (NVDEC, device memory)
-                  -> torch.from_dlpack(frame)        # NV12 view, zero-copy
+                  -> torch.from_dlpack(frame)        # NV12/P016 view, zero-copy
                   -> in-place block pixelate of Y+UV through the held
                      person-mask (torch ops on the same CUDA surface)
                   -> CreateEncoder (NVENC, P5/hq, VBR + explicit CQ)
-                  -> FFmpegMuxer (audio/subs passthrough, bit-exact PTS)
+                  -> FFmpegMuxer (audio passthrough, bit-exact PTS; subtitle-bearing
+    sources are sub-stripped upstream — see blur.run_blur)
 
 Frames never touch the CPU; the blur is ~2 pooled resamples + a where() on
-the GPU per frame, and the warning overlay is two masked_fill_ passes over
-precomputed BT.709 NV12 color constants. The demux/decode/encode/mux loop is
+the GPU per frame, and the warning overlay is a handful of masked where()
+passes over precomputed BT.709 NV12 color constants. The demux/decode/encode/mux loop is
 the PyNvVideoCodec `advanced/transcode.py` reference with the blur inserted
 between Decode() and Encode().
 """
@@ -41,7 +42,7 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
     """-> stats dict. Requires the container's GPU stack (torch + CUDA)."""
     import torch
     import PyNvVideoCodec as nvc
-    from .blur import probe_fps
+    from .blur import probe_fps, probe_pix_fmt
     import bisect
     import cv2
 
@@ -50,6 +51,39 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
     pixels = pixels or config.BLUR_PIXELS
     block = max(2, int(round(pixels * w / 1920)))
     src_fps = probe_fps(video_path)
+    # Bit-depth adapter: 8-bit sources decode to NV12 surfaces, 10-bit
+    # (HEVC main10 etc.) to P016 — same Y + interleaved-UV layout, but
+    # uint16 words with samples MSB-aligned (10-bit << 6). The zero-copy
+    # path works for both: NVENC encodes main10 and every depth-dependent
+    # constant flows from here. The encoder must be created BEFORE the
+    # first decode, so the depth comes from the probe, not the surface.
+    # (Found by Gone Girl's 10-bit WEBRip: NV12-forced NVENC aborted the
+    # process on the first header write — 'Error writing header'.)
+    ten_bit = "10" in probe_pix_fmt(video_path)
+    # NVENC's 10-bit format is "P010"; the binding's parser rejects the
+    # P016 enum name ("Unknown format") even though NVDEC labels its main10
+    # surfaces P016 — same Y + interleaved-UV layout, 16-bit words,
+    # samples MSB-aligned (10-bit << 6).
+    enc_pf = "P010" if ten_bit else nvc.Pixel_Format.NV12.name
+    word_dtype = torch.uint16 if ten_bit else torch.uint8
+    word_max = 65472 if ten_bit else 255            # 10-bit sample << 6
+    lvl = (lambda v: v << 8) if ten_bit else (lambda v: v)  # 8-bit level -> word
+
+    # PyNvVideoCodec 2.2.3 consumes Encode() inputs by calling
+    # Tensor.__dlpack__(stream) POSITIONALLY; torch 2.14's is keyword-only
+    # and raises TypeError. Bridge once, process-wide — no-arg and keyword
+    # callers keep working unchanged. (Probed: without this, NV12 tensors
+    # die on "takes 1 positional argument" and the encoder falls back to
+    # "incorrect usage of CPU input buffer" for anything it can't sniff.)
+    if not getattr(torch.Tensor.__dlpack__, "_posarg_ok", False):
+        _orig_dlpack = torch.Tensor.__dlpack__
+
+        def _dlpack_posarg(self, *args, **kwargs):
+            return _orig_dlpack(
+                self, stream=args[0] if args else kwargs.get("stream"))
+
+        _dlpack_posarg._posarg_ok = True
+        torch.Tensor.__dlpack__ = _dlpack_posarg
     device = torch.device("cuda")
     torch.cuda.init()
 
@@ -66,7 +100,7 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
     # high-quality tuning + VBR at constant quality, no default bitrate.
     # source_av_format_context carries source fps/VUI/container-mode.
     nv_enc = nvc.CreateEncoder(
-        w, h, nvc.Pixel_Format.NV12.name, False,
+        w, h, enc_pf, False,
         codec="hevc", gpu_id=0, preset="P5", tuning_info="high_quality",
         rc="vbr", cq=int(cq),
         source_av_format_context=int(nv_dmx.GetAVFormatInputContext()))
@@ -109,20 +143,22 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
         pooled = torch.nn.functional.avg_pool2d(fy, block)
         up = torch.nn.functional.interpolate(
             pooled, size=(h, w), mode="nearest")
-        y.copy_(torch.where(my, up.squeeze(0).squeeze(0).round().clamp(0, 255),
-                             y).to(torch.uint8))
+        y.copy_(torch.where(my, up.squeeze(0).squeeze(0).round().clamp(0, word_max),
+                             y).to(word_dtype))
         fuv = uv.unsqueeze(0).unsqueeze(0).float()
         pooled_u = torch.nn.functional.avg_pool2d(fuv, max(2, block // 2))
         up_u = torch.nn.functional.interpolate(
             pooled_u, size=(hu, w), mode="nearest")
         uv.copy_(torch.where(
-            muv, up_u.squeeze(0).squeeze(0).round().clamp(0, 255),
-            uv).to(torch.uint8))
+            muv, up_u.squeeze(0).squeeze(0).round().clamp(0, word_max),
+            uv).to(word_dtype))
 
     # warning overlay, NV12 / BT.709 limited range: pure red -> Y 63 Cb 102
     # Cr 240; black outline -> Y 16 Cb 128 Cr 128. Cached per (si, ki).
-    RED_Y, RED_CB, RED_CR = 63, 102, 240
-    BLK_Y, BLK_CB, BLK_CR = 16, 128, 128
+    # lvl() lifts the 8-bit levels into P016 words on 10-bit sources
+    # (v << 8; the 0.2% rounding vs exact 1023/255 scaling is invisible).
+    RED_Y, RED_CB, RED_CR = lvl(63), lvl(102), lvl(240)
+    BLK_Y, BLK_CB, BLK_CR = lvl(16), lvl(128), lvl(128)
 
     def overlay_masks(si: int, ki: int):
         """-> (red_y, blk_y, red_uv, blk_uv) bool tensors, or None when the
@@ -154,13 +190,21 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
     def composite_overlay(t: torch.Tensor, ov) -> None:
         ry, by, ruv, buv = ov
         y, uv = t[:h], t[h:]
-        y.masked_fill_(by, BLK_Y)
-        y.masked_fill_(ry, RED_Y)
+        # masked_fill_ is not implemented for UInt16 CUDA (torch 2.14 op
+        # gap — same family as remainder/min/max) — fill via the same
+        # promote -> where -> cast path pixelate_yuv already uses
+        def fill(x: torch.Tensor, mask: torch.Tensor, value: int) -> None:
+            x.copy_(torch.where(mask, torch.full_like(mask, value,
+                                                      dtype=torch.float32),
+                                x.float()).to(word_dtype))
+
+        fill(y, by, BLK_Y)
+        fill(y, ry, RED_Y)
         cb, cr = uv[:, 0::2], uv[:, 1::2]
-        cb.masked_fill_(buv[:, 0::2], BLK_CB)
-        cr.masked_fill_(buv[:, 1::2], BLK_CR)
-        cb.masked_fill_(ruv[:, 0::2], RED_CB)
-        cr.masked_fill_(ruv[:, 1::2], RED_CR)
+        fill(cb, buv[:, 0::2], BLK_CB)
+        fill(cr, buv[:, 1::2], BLK_CR)
+        fill(cb, ruv[:, 0::2], RED_CB)
+        fill(cr, ruv[:, 1::2], RED_CR)
 
     frames = blurred = 0
     held = {"si": -1, "ki": -1}
@@ -176,6 +220,19 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
                 for frame in nv_dec.Decode(pkt):
                     last_progress = time.monotonic()
                     t_sec = frames / src_fps
+                    if ten_bit:
+                        # every frame takes this path, not just blurred
+                        # ones — Encode() rejects the raw dlpack frame (its
+                        # export carries u16 geometry on a u1 typestr, and
+                        # the binding validates typestr). Re-stride to the
+                        # true word layout for the kernels, then hand NVENC
+                        # the u8 HWC view of the same memory that its P010
+                        # stride check expects.
+                        t0 = torch.from_dlpack(frame)
+                        surf = torch.as_strided(t0, (h * 3 // 2, w), (w, 1))
+                        enc_in = surf.unsqueeze(-1).view(torch.uint8)
+                    else:
+                        enc_in = frame
                     si = bisect.bisect_right(starts, t_sec) - 1
                     if (0 <= si < len(seg_bounds)
                             and seg_bounds[si][0] <= t_sec <= seg_bounds[si][1]
@@ -183,7 +240,8 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
                         ki = max(0, bisect.bisect_right(kf_index[si], t_sec) - 1)
                         if held["si"] != si or held["ki"] != ki:
                             held = {"si": si, "ki": ki}
-                        surf = torch.from_dlpack(frame)
+                        if not ten_bit:
+                            surf = torch.from_dlpack(frame)
                         pixelate_yuv(surf, *full_masks(si, ki))
                         ov = overlay_masks(si, ki)
                         if ov is not None:
@@ -198,7 +256,7 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
                     pp = nvc.NV_ENC_PIC_PARAMS()
                     pp.inputTimeStamp = frames
                     frames += 1
-                    for enc_pkt in nv_enc.Encode(frame, pp):
+                    for enc_pkt in nv_enc.Encode(enc_in, pp):
                         muxer.MuxVideoPacket(bytes(enc_pkt["data"]),
                                              enc_pkt["picture_type"],
                                              enc_pkt["timestamp"])

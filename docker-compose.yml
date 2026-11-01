@@ -1,26 +1,21 @@
-# Production stack: scanner (detector + pipeline) + VLM arbiter sidecar.
+# All-in-one: the whole pipeline — scan -> VLM arbiter (llama-server on
+# loopback) -> crowd -> GPU blur render — in ONE container.
 #
-# The arbiter is a llama-server container (Qwen3-VL-30B-A3B MoE GGUF,
-# OpenAI-compatible API) — the scanner reaches it via ARBITER_BASE_URL and
-# never loads a VLM in-process (design doc §10: 0.054s/frame at 4 slots,
-# 10 contested-GT flips vs 2 for the transformers 8B). Both share the GPU;
-# ~22.5GB of 24GB total.
+#   docker compose up -d     # API on :8081, arbiter inside on 127.0.0.1
 #
-#   docker compose up -d          # scanner on :8081, sidecar on the internal
-#                                 # network only
+# llama-server claims ~20.5GB VRAM at model load; the entrypoint
+# health-gates it before the API starts (the ordering the old
+# two-container stack had via depends_on: service_healthy). One GPU,
+# ~22.5GB of 24GB in use.
 services:
-  vlm:
-    image: ghcr.io/darkstar1997/movie-trimmer-vlm-qwen3vl-30b-a3b:v1
-    # -ub 2048 uncaps the image-token budget (512 -> 1120) so dim/distant
-    # figures get full-resolution vision tokens
-    environment:
-      EXTRA_ARGS: "-ub 2048"
-    shm_size: 2g
-    gpus: all
-    restart: unless-stopped
-
-  scanner:
-    image: ghcr.io/darkstar1997/movie-trimmer-scanner:v1
+  movie-trimmer:
+    build:
+      # compose silently skips services with no build: section — the pair
+      # layout once shipped a "fix" that wasn't in the container this way
+      context: .
+      dockerfile: allinone.Dockerfile
+    image: ghcr.io/darkstar1997/movie-trimmer:v1
+    init: true
     ports:
       - "8081:8081"
     volumes:
@@ -28,11 +23,7 @@ services:
       - ./:/movies:ro
       - ./blur_outputs:/blur_outputs
     environment:
-      ARBITER_BASE_URL: http://vlm:8082
       ARBITER_HTTP_CONCURRENCY: "4"
       BLUR_OUTPUT_DIR: /blur_outputs
     gpus: all
-    depends_on:
-      vlm:
-        condition: service_healthy
     restart: unless-stopped
