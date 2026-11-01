@@ -775,6 +775,16 @@ network-free on the host). Combined scan rerun end-to-end (detector +
   (~65s vs ~157s judging) is masked by the per-frame-seek extraction
   fallback; fixing extraction is the next optimization, not the model.
 
+### Adoption (same day)
+
+The 30B-A3B sidecar is the production arbiter from here on: scanner
+image no longer bundles the 8B (17GB lighter), docker-compose.yml
+defines the pair (scanner + llama-server sidecar on one GPU,
+ARBITER_BASE_URL wiring, sidecar health-gated startup). The in-process
+transformers path remains as a generic env-switch fallback for hosts
+that mount weights into VLM_DIR.
+
+
 
 
 
