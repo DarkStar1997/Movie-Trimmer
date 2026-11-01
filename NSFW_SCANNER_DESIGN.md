@@ -725,6 +725,34 @@ to catch, and slower by ~4x. Qwen3-VL-8B (transformers, in-process)
 remains the arbiter; the model-bound ceiling stands. Bigger is not
 better here — twice tested, twice true (Gemma-4-12B, Qwen3.8-27B).
 
+### Qwen3-VL-30B-A3B UD-Q4_K_XL (same harness, same day) — best yet
+
+Same family as the production 8B but MoE: 30B total, ~3B active per
+token. Weights under `models/qwen3-vl-30b-a3b/` (17.7GB + mmproj).
+`qwen3vlmoe` arch is supported by the pinned llama.cpp v0.8.0. No MTP
+drafter exists for it — MoE decode is already cheap.
+
+- Positives 3/4: 3490.0 flickers (1 explicit of 4 judgments across
+  probe re-runs + recheck) — borderline, not blind: contrast the 27B's
+  stable high-confidence misses.
+- Controls 0/9.
+- Contested ranges: **10 flips** (sex-tail 3445-3460, dress-head
+  3474-3483), identical across two full probe runs — 5x the
+  transformers record (2) and 2.5x the 8B GGUF (4). First candidate to
+  lift the model-bound ceiling, and by a lot.
+- Labels: correct-dominant with richer multi-label output
+  (FEMALE_BREAST where transformers says so; sex-tail frames add
+  MALE_GENITALIA/BUTTOCKS, plausible for that scene).
+- Throughput: **0.054 s/frame at 4 concurrent** — ~2x the 8B GGUF
+  (0.101), 2.6x production transformers (0.14). VRAM 20.5/24 GB.
+
+Verdict: strongest candidate measured. Adopting it means moving the
+arbiter from in-process transformers to an OpenAI-client path against
+a llama-server sidecar (scanner image stops bundling the VLM). The
+parked Qwen3-VL-8B BF16 GGUF A/B remains the label-degradation
+root-cause test for the 8B line.
+
+
 
 
 
