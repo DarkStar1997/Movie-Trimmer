@@ -636,3 +636,40 @@ tracked person mask whose pixels sit exactly on the 24px block grid
 start. Host tests: 9 crowd unit tests on a saved real-page fixture plus
 an end-to-end `run_scan(crowd=true)` smoke test (98/98, network-free).
 
+## 10. Gemma-4-12B arbiter candidate — rejected (llama.cpp, 2026-11-01)
+
+Infrastructure (kept: `vlm.Dockerfile`, 3 stages): llama.cpp **v0.8.0**
+built from source (CUDA 13, flash attention all-quants, arch 89), server
+running `unsloth/gemma-4-12B-it-qat-GGUF` (UD-Q4_K_XL) + `mmproj-BF16`
++ the **MTP drafter** (`--spec-type draft-mtp --spec-draft-n-max 4`,
+`-fa on`, `-ub 2048` to uncap the 1120-token image budget; thinking off
+via `chat_template_kwargs.enable_thinking=false` → 0.27 s/frame
+single-stream, 18 output tokens/frame). Build notes: CUDA 13 needs
+`-DCMAKE_LIBRARY_PATH=/usr/local/cuda/lib64/stubs` for the driver-API
+link; v0.8.0's server refactor ships `libllama-server-impl.so` so the
+whole `build/bin` dir must be copied together.
+
+Detection verdict on the reference movie — **rejected**:
+
+- Contested GT ranges (motionless / sex-tail / dress-head, 89 frames at
+  1s density — the exact set Qwen3-VL-8B zeroes out): **1 flip**, and
+  it mislabels it (MALE_GENITALIA on the dress-open scene).
+- Known positives the production stack already catches: **1/4** (missed
+  the flash, the sex-scene moment, dress-3490; all conf=1.0 clean).
+- Controls: 0/9 — precision holds, but so does Qwen's.
+- Diagnosis: not safety-blind in general (flags the close-up Ava nudity
+  at conf 0.98) and not resolution-starved (identical verdicts at
+  `--image-max-tokens 1120`; still clean on a 3× zoomed crop of the
+  masked person region). It is **dominant-figure biased**: asked to
+  describe the exact frames, it narrates the foreground man in the
+  doorway and never registers the small distant nude figure — the
+  dim/distant regime §7 built the whole recall fix around.
+- Throughput: 0.27 s/frame single-stream vs Qwen's ~0.14 s/frame batched
+  — no speed win either, at 12 GB VRAM held.
+
+Conclusion: a bigger VLM is not a better arbiter for this task;
+Qwen3-VL-8B stays. The llama.cpp serving stack is kept for the next
+candidate (e.g. a Qwen3-VL GGUF under the same harness would isolate
+serving-runtime from model bias).
+
+
