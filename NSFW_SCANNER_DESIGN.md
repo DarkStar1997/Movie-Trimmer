@@ -396,13 +396,18 @@ frames with 0 flips and 0 FPs (VLM correctly rejects blurry sub-
 threshold distant hits — precision holds). Wall 544s (11.9× realtime)
 with 900 VLM frames judged in 157s.
 
-Final A/B (v3: + orphan routing, full 10s grid at 1100 frames; v4: +
-orphan companions): **GT recall 5.6% → 15.0%** exact (36/237s),
-**6.5% → 25.1%** at ±60s tolerance; sex scene 7.8% → 15.2%, dress-open
-0% → 68%, bed scene covered under tolerance. Regression audit across
-all runs: no clean-control region ever newly flagged, losses are
-0.2–8s boundary slivers of still-covered scenes, 0 VLM refusals,
-47 segments / 502s flagged (baseline 50 / 394s).
+Final A/B (v3: + orphan routing, full 10s grid at 1100 frames; v4/v5:
++ orphan companions): **GT recall 5.6% → 12.0%** exact (28/237s; 15.0%
+observed under one batch binning — borderline VLM verdicts shift a
+sweep hit or two when the batch composition changes, detector segments
+stay byte-identical), **6.5% → 28.9%** at ±60s tolerance; dress-open
+0% → 68%, the sub-second flash captured as a real segment (the 52:16
+CringeMDB entry is plausibly this flash within their ±1min accuracy),
+sex scene 7.8% → ~12-15%. v4 and v5 (same code) reproduce exactly.
+Regression audit across all five runs: no clean-control region ever
+newly flagged, losses are 0.2-8s boundary slivers of still-covered
+scenes, 0 VLM refusals, 47 segments / ~505s flagged (baseline 50 /
+394s).
 
 ### The remaining gap is model-bound (evidence)
 
