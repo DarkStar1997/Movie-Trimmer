@@ -46,6 +46,7 @@ from pathlib import Path
 
 from . import config
 from .temporal import SmoothingConfig
+from . import vlm
 
 logger = logging.getLogger(__name__)
 
@@ -697,6 +698,7 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
                     "refusals": 0, "segment_verdicts": [], "new_segments": [],
                     "rejected_segments": [], "error": None}
     workdir = workdir or Path(config.SCAN_WORKSPACE_DIR) / "arbiter"
+    vlm_acquired = False
     try:
         planned = plan_frames(duration, segments,
                               person_ranges=person_ranges,
@@ -709,6 +711,14 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
         if not planned:
             result["wall_time_s"] = round(time.monotonic() - t0, 2)
             return result
+
+        # on-demand VLM: bring llama-server up BEFORE frame extraction so
+        # the model load overlaps ffmpeg. A bring-up failure raises into
+        # the handler below -> loud error block, scan continues
+        # detector-only (the same contract as any arbiter failure).
+        if config.ARBITER_BASE_URL:
+            vlm.acquire()
+            vlm_acquired = True
 
         shutil.rmtree(workdir, ignore_errors=True)  # stale frames from prior run
         files = extract_frames(video_path, [f.t for f in planned], workdir)
@@ -769,5 +779,7 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
         logger.exception("[arbiter] failed")
         result["error"] = f"{type(e).__name__}: {e}"
     finally:
+        if vlm_acquired:
+            vlm.release()   # last releaser stops llama-server, frees ~20GB
         result["wall_time_s"] = round(time.monotonic() - t0, 2)
     return result

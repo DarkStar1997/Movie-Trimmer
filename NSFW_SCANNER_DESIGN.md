@@ -984,6 +984,26 @@ Implications:
   changed (fp16→fp32) or the ONNX was re-exported — and NudeNet had a
   latent fp16/fp32 engine-name collision for the same reason.
 
+## 13. On-demand VLM (2026-11-02)
+
+llama-server held ~20GB of VRAM for the container's whole life, though
+only the arbiter phase of a scan ever queries it — blur (TRT + nvenc)
+and verification (host ffmpeg) never touch it, and ran in the ~3.5GB
+that was left. `scanner/vlm.py` gives it a deterministic lifecycle
+instead: `acquire()` spawns llama-server and health-gates it
+(`run_arbiter` calls it BEFORE frame extraction so the model load
+overlaps ffmpeg), `release()` refcounts down and the last releaser
+terminates the process, freeing the VRAM. The entrypoint now boots only
+the API; `/health` reports the server state without probing it (a
+health check must never spawn a 20GB model).
+
+Failure contract unchanged and loud: if bring-up fails (process exit,
+health timeout), `run_arbiter` records an error block and the scan
+finishes detector-only — the same contract as any arbiter failure, and
+the scan JSON says so. `MODEL/MMPROJ/CTX/PARALLEL/EXTRA_ARGS/DRAFT`
+envs move from the entrypoint to the supervisor unchanged.
+
+
 
 
 

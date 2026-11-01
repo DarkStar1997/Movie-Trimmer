@@ -245,3 +245,7 @@ ARBITER_HTTP_CONCURRENCY = int(
     os.environ.get("ARBITER_HTTP_CONCURRENCY", "4"))
 ARBITER_HTTP_TIMEOUT_S = float(
     os.environ.get("ARBITER_HTTP_TIMEOUT_S", "120"))
+# On-demand VLM (scanner/vlm.py): llama-server spawns when arbiter work
+# starts and stops when it ends — the ~20GB stays free between jobs.
+VLM_START_TIMEOUT_S = float(os.environ.get("VLM_START_TIMEOUT_S", "900"))
+VLM_STOP_GRACE_S = float(os.environ.get("VLM_STOP_GRACE_S", "30"))

@@ -210,6 +210,7 @@ def health():
     from .arbiter import resolve_vlm_path
     from .detector import _trt_available
     from .trt import gpu_slug, trt_slug
+    from . import vlm as vlm_supervisor
     vlm = resolve_vlm_path(config.DEFAULT_ARBITER_MODEL)
     return {
         "gpu": gpu_slug(),
@@ -221,6 +222,9 @@ def health():
             "model": config.DEFAULT_ARBITER_MODEL,
             "path": vlm,
             "available": Path(vlm).is_dir(),
+            # on-demand server state — reported, never probed: /health
+            # must not spawn the ~20GB model (vlm.acquire does that)
+            "server": vlm_supervisor.status(),
         },
         "loaded_detectors": [f"{m}/{b}"
                              for (m, b, _, _) in registry._detectors.keys()],
