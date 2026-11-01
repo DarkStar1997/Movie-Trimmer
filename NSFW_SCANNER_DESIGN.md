@@ -752,6 +752,30 @@ a llama-server sidecar (scanner image stops bundling the VLM). The
 parked Qwen3-VL-8B BF16 GGUF A/B remains the label-degradation
 root-cause test for the 8B line.
 
+### Full-movie validation of the 30B-A3B arbiter (same day)
+
+ARBITER_BASE_URL HTTP backend added (scanner/arbiter.py): OpenAI
+/v1/chat/completions client, env-switched, ARBITER_HTTP_CONCURRENCY
+parallel requests; the in-process transformers VLM is never loaded
+when set (pure-function http_request_body/http_response_text tested
+network-free on the host). Combined scan rerun end-to-end (detector +
+30B arbiter apply + crowd) → scans/exmachina_combined_crowd_arbiter_
+30b.json; blur render blur_outputs/blurred_21453785.mp4.
+
+- 63 segments vs 46; 28 carry the arbiter label vs 17.
+- In-pipeline ceiling lift confirmed: frames the 8B called clean at
+  conf 0.98 (t=3460/3500/3510) flip explicit under the 30B; its
+  dress-head/sex-tail hits land inside the crowd range and extend its
+  tail 3491.5 -> 3518 (labels cringemdb + arbiter:4 merged).
+- Clean controls 0/9 in any non-crowd segment; all four probe
+  positives covered; verify_blur ALL PASS (bit-exact audio, packet
+  parity, blur present on new VLM segments 442-468/3299-3518/3552-
+  3568, 9/9 clean controls exact-match source).
+- Cost neutral: scan wall 750.9s vs 754.3s — the HTTP inference gain
+  (~65s vs ~157s judging) is masked by the per-frame-seek extraction
+  fallback; fixing extraction is the next optimization, not the model.
+
+
 
 
 

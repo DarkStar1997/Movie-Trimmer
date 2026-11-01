@@ -206,3 +206,13 @@ ARBITER_EXPAND_MAX_FRAMES = int(
     os.environ.get("ARBITER_EXPAND_MAX_FRAMES", "96"))
 ARBITER_MODES = ("verify", "apply")  # verify: annotate; apply: also merge/remove
 ARBITER_FRAME_W = 1024          # extraction width for VLM frames
+# Off-box arbiter: when ARBITER_BASE_URL is set (e.g. a llama-server
+# sidecar speaking the OpenAI /v1/chat/completions API), judgments go
+# over HTTP and the in-process transformers VLM is NEVER loaded — same
+# prompts, same parse/aggregate path, ~17GB VRAM freed for the sidecar.
+# Empty (default) = in-process transformers with the baked weights.
+ARBITER_BASE_URL = os.environ.get("ARBITER_BASE_URL", "")
+ARBITER_HTTP_CONCURRENCY = int(
+    os.environ.get("ARBITER_HTTP_CONCURRENCY", "4"))
+ARBITER_HTTP_TIMEOUT_S = float(
+    os.environ.get("ARBITER_HTTP_TIMEOUT_S", "120"))

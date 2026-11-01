@@ -5,9 +5,11 @@ Pure-function coverage only — no torch/transformers on the host.
 
 import pytest
 
-from scanner.arbiter import (PlannedFrame, _cluster_hits, _subtract,
-                             aggregate, parse_verdict, plan_expansion,
-                             plan_frames, resolve_vlm_path)
+from scanner.arbiter import (ARBITER_SYSTEM_PROMPT, ARBITER_USER_TEXT,
+                             PlannedFrame, _cluster_hits, _subtract,
+                             aggregate, http_request_body,
+                             http_response_text, parse_verdict,
+                             plan_expansion, plan_frames, resolve_vlm_path)
 from scanner import config
 from scanner.temporal import SmoothingConfig
 
@@ -331,3 +333,33 @@ def test_aggregate_pads_companions_like_sweep(monkeypatch):
     ex = {"explicit": True, "labels": [], "confidence": 0.9}
     out = aggregate(planned, [ex], 600.0, SmoothingConfig(pad_s=1.5), [])
     assert [(s["start"], s["end"]) for s in out["new_segments"]] == [(192.0, 208.0)]
+
+
+# --- HTTP backend (pure pieces; no sockets on the host) --------------------------
+
+def test_http_request_body_shape():
+    body = http_request_body("QUJD", thinking_off=True)
+    assert body["temperature"] == 0.0
+    assert body["max_tokens"] == 120
+    assert body["chat_template_kwargs"] == {"enable_thinking": False}
+    sys_msg, user_msg = body["messages"]
+    assert sys_msg == {"role": "system",
+                       "content": ARBITER_SYSTEM_PROMPT}
+    img, txt = user_msg["content"]
+    assert img["image_url"]["url"] == "data:image/jpeg;base64,QUJD"
+    assert txt == {"type": "text", "text": ARBITER_USER_TEXT}
+
+
+def test_http_request_body_without_thinking_kwarg():
+    body = http_request_body("QUJD", thinking_off=False)
+    assert "chat_template_kwargs" not in body
+
+
+def test_http_response_text_variants():
+    ok = {"choices": [{"message": {"content": '{"explicit": false}'}}]}
+    assert http_response_text(ok) == '{"explicit": false}'
+    assert http_response_text(
+        {"choices": [{"message": {"content": None}}]}) == ""
+    assert http_response_text({"choices": []}) == ""
+    assert http_response_text({}) == ""
+    assert http_response_text(None) == ""

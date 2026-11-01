@@ -23,12 +23,16 @@ Planning policy (see config):
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
 import shutil
 import subprocess
 import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -453,6 +457,84 @@ def _extract_seek(video_path: str, times: list[float], workdir: Path,
     return [f for f in out if f.exists()]
 
 
+# --- HTTP backend (OpenAI-compatible sidecar, e.g. llama-server) ---------------
+#
+# Same prompts and verdict contract as the in-process path; the sidecar
+# owns the model (any llama.cpp-compatible VLM — a Qwen3-VL-30B-A3B MoE
+# measured 0.054s/frame at 4 concurrent slots, ~2.6x the in-process 8B's
+# batched rate, see NSFW_SCANNER_DESIGN.md §10). Enabled by
+# ARBITER_BASE_URL; per-frame failures degrade to "" which parse_verdict
+# counts as a refusal — the scan itself never fails on the sidecar.
+
+_HTTP_MAX_TOKENS = 120        # verdict JSON + template overhead (~20 measured)
+_THINK_KWARG_OK: bool | None = None   # None = probe; set after first response
+
+
+def http_request_body(image_b64: str, *, thinking_off: bool = True) -> dict:
+    """Pure: /v1/chat/completions body for one frame (JPEG data URL)."""
+    body: dict = {
+        "max_tokens": _HTTP_MAX_TOKENS,
+        "temperature": 0.0,
+        "messages": [
+            {"role": "system", "content": ARBITER_SYSTEM_PROMPT},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {
+                    "url": f"data:image/jpeg;base64,{image_b64}"}},
+                {"type": "text", "text": ARBITER_USER_TEXT}]}]}
+    if thinking_off:
+        # thinking-capable templates (Qwen3.8-27B) burn the whole budget
+        # on reasoning and return an empty verdict; templates that reject
+        # the kwarg 400 and are probed once without it
+        body["chat_template_kwargs"] = {"enable_thinking": False}
+    return body
+
+
+def http_response_text(response: dict) -> str:
+    """Pure: content text from a chat completion ("" on odd shapes)."""
+    try:
+        return response["choices"][0]["message"]["content"] or ""
+    except (KeyError, IndexError, TypeError):
+        return ""
+
+
+def _http_judge_one(url: str, path: Path) -> str:
+    global _THINK_KWARG_OK
+    b64 = base64.b64encode(path.read_bytes()).decode()
+    attempts = ([_THINK_KWARG_OK] if _THINK_KWARG_OK is not None
+                else [True, False])
+    for thinking_off in attempts:
+        body = json.dumps(
+            http_request_body(b64, thinking_off=thinking_off)).encode()
+        req = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(
+                    req, timeout=config.ARBITER_HTTP_TIMEOUT_S) as r:
+                out = http_response_text(json.load(r))
+                if _THINK_KWARG_OK is None:
+                    _THINK_KWARG_OK = thinking_off
+                return out
+        except urllib.error.HTTPError as e:
+            if e.code == 400 and _THINK_KWARG_OK is None and thinking_off:
+                _THINK_KWARG_OK = False    # template rejects the kwarg
+                continue
+            logger.warning("[arbiter] http judge failed on %s: %s", path, e)
+            return ""
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            logger.warning("[arbiter] http judge error on %s: %s", path, e)
+            return ""
+    return ""
+
+
+def _judge_with_http(files: list[Path]) -> list[str]:
+    """Judge frames against the sidecar concurrently — its slots are the
+    throughput unit (ARBITER_HTTP_CONCURRENCY should match them)."""
+    url = config.ARBITER_BASE_URL.rstrip("/") + "/v1/chat/completions"
+    with ThreadPoolExecutor(
+            max_workers=config.ARBITER_HTTP_CONCURRENCY) as ex:
+        return list(ex.map(lambda f: _http_judge_one(url, f), files))
+
+
 # --- runner (lazy torch/transformers — runs in the container only) -------------
 
 
@@ -587,9 +669,20 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
         shutil.rmtree(workdir, ignore_errors=True)  # stale frames from prior run
         files = extract_frames(video_path, [f.t for f in planned], workdir)
         model = processor = None
+        loaded_transformers = False
         try:
-            model, processor = _load_vlm(model_id)
-            raw = _judge_batch(files, model, processor)
+            if config.ARBITER_BASE_URL:
+                result["backend"] = "http"
+                result["backend_url"] = config.ARBITER_BASE_URL
+                judge = _judge_with_http
+            else:
+                model, processor = _load_vlm(model_id)
+                loaded_transformers = True
+
+                def judge(fs: list[Path]) -> list[str]:
+                    return _judge_batch(fs, model, processor)
+
+            raw = judge(files)
             all_planned = list(planned)
             verdicts = [parse_verdict(r) for r in raw]
 
@@ -610,7 +703,7 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
                 if exp:
                     exp_files = extract_frames(
                         video_path, [f.t for f in exp], workdir)
-                    raw2 = _judge_batch(exp_files, model, processor)
+                    raw2 = judge(exp_files)
                     all_planned += exp
                     verdicts += [parse_verdict(r) for r in raw2]
                     result["expansion_frames"] = len(exp)
@@ -625,8 +718,9 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
             result.update(aggregate(all_planned, verdicts, duration,
                                     smoothing, segments))
         finally:
-            model = processor = None      # drop frame refs BEFORE unload
-            _unload_vlm()
+            if loaded_transformers:
+                model = processor = None  # drop frame refs BEFORE unload
+                _unload_vlm()
     except Exception as e:  # noqa: BLE001 — arbiter must not fail the scan
         logger.exception("[arbiter] failed")
         result["error"] = f"{type(e).__name__}: {e}"
