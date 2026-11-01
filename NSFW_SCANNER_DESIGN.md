@@ -697,5 +697,34 @@ transformers keeps label fidelity. Adopting it means an OpenAI-client
 arbiter path (currently in-process transformers) — worth doing only if
 the label degradation is understood first.
 
+### Qwen3.8-27B UD-Q4_K_M + MTP drafter (same harness, same day)
+
+Bigger-model hypothesis: recover more contested GT and fix the 8B GGUF's
+label degradation. Weights under `models/qwen3.8-27b/` (UD-Q4_K_M 16.5GB
++ mmproj-BF16 + Q4_0 MTP drafter, the largest quant that fits 24GB with
+KV headroom). It is a thinking model: `chat_template_kwargs:
+{"enable_thinking": false}` (or `reasoning_effort: "none"`) is required —
+the default burns the whole budget on reasoning and returns empty
+verdicts.
+
+- Positives 2/4 — misses both dress-head positives (3483.0/3490.0) as
+  high-confidence clean, stably across repeats. Worse, one of its two
+  hits (3433.3) flips back to clean on re-run: borderline verdicts are
+  non-deterministic under MTP/batching numerics.
+- Controls 0/9 (only metric at parity).
+- Contested ranges: 0 flips — recovers none of the ceiling.
+- Labels correct (FEMALE_BREAST) — evidence the 8B GGUF's
+  MALE_GENITALIA degradation is quant/model-specific, not a
+  llama.cpp-serving artifact.
+- Throughput 0.387 s/frame at 4 workers (MTP drafter on) vs 0.101 for
+  the 8B GGUF; VRAM 22.6/24 GB.
+
+Verdict: REJECTED. A larger model of a different family is less
+sensitive on exactly the borderline-nudity frames this arbiter exists
+to catch, and slower by ~4x. Qwen3-VL-8B (transformers, in-process)
+remains the arbiter; the model-bound ceiling stands. Bigger is not
+better here — twice tested, twice true (Gemma-4-12B, Qwen3.8-27B).
+
+
 
 
