@@ -126,14 +126,15 @@ def main():
                       f"{n_out} vs {n_src}"))
 
     def audio_sig(path):
-        # md5 over the concatenated packet PAYLOAD bytes (-f data): raw
-        # pts/dts strings differ across containers (mkv 1ms vs mp4
-        # per-track timescales) and decoded PCM differs by decode-side
-        # skip/edit-list semantics — neither is a passthrough defect.
-        # Byte-exact elementary stream is the meaningful invariant.
+        # md5 over the packet payload bytes via ffmpeg's md5 muxer (binary
+        # in a text capture breaks; the md5 muxer prints one text line).
+        # FULL stream only — no seeks: seek windows land on different
+        # packet boundaries per container. Raw pts strings and decoded PCM
+        # both legitimately differ across containers (timescales, skip/
+        # edit-list decode semantics); byte-exact payload is the invariant.
         o = run(["ffmpeg", "-v", "error", "-i", path, "-map", "0:a:0",
-                 "-c", "copy", "-f", "data", "-"])
-        return hashlib.md5(o.stdout).hexdigest()
+                 "-c", "copy", "-f", "md5", "-"])
+        return o.stdout.strip().split("=")[-1]
     results.append(ok("audio packets bit-exact (payload md5)",
                       audio_sig(OUT) == audio_sig(SRC), ""))
 
