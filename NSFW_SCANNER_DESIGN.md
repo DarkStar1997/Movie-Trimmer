@@ -863,6 +863,24 @@ published for hosts that want independent lifecycles. Trade-off
 accepted: a scanner crash now also reloads the model on container
 restart (the pair kept the sidecar warm through scanner restarts).
 
+**The verify/apply trap (found on the first all-in-one scan).** The
+first full Gone Girl scan on the single container came back with 19
+segments instead of 38 — 23 regions the pair had blurred were suddenly
+uncovered, zero arbiter labels. The server was exonerated by an A/B
+probe (same weights, same flags, same frames against both the vlm
+image's CUDA 13.0 libs and the all-in-one's torch-wheel 13.1 libs:
+identical verdicts, identical 808 prompt tokens — the cuBLAS
+minor-version delta is behaviorally irrelevant). The scan JSON held
+the answer: `"mode": "verify"`. `/scan`'s `arbiter_mode` defaults to
+`verify`, and the run's own `arbiter.new_segments` contained all 30
+blind-spot segments (42–58s, 402–418s, …) — computed, correct, and
+discarded, because pipeline.py merges `new_segments` only in `apply`
+mode. `verify` annotates candidates; only `apply` adds VLM-found
+segments. Full coverage needs `-F arbiter_mode=apply` on the
+submission. Lesson recorded: when a stage's output vanishes, diff the
+*recorded request parameters* first — the answer was in the JSON the
+whole time.
+
 
 
 
