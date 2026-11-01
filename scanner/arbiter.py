@@ -730,6 +730,16 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
                 result["backend_url"] = config.ARBITER_BASE_URL
                 judge = _judge_with_http
             else:
+                resolved = resolve_vlm_path(model_id)
+                if not Path(resolved).is_dir():
+                    raise RuntimeError(
+                        "arbiter requested without ARBITER_BASE_URL and no local "
+                        f"VLM weights at '{resolved}' (arbiter_model={model_id!r}). "
+                        "The supported arbiter is the llama-server sidecar "
+                        "(ARBITER_BASE_URL, or the on-demand supervisor with the "
+                        "30B GGUF baked into the all-in-one image). In-process "
+                        "transformers is opt-in: point arbiter_model at a local "
+                        "HF weights directory.")
                 model, processor = _load_vlm(model_id)
                 loaded_transformers = True
 

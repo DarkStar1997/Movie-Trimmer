@@ -1,7 +1,9 @@
-# Gemma-4-12B-it / Qwen3-VL-8B VLM arbiter candidates — llama.cpp (CUDA +
-# flash attention, optional MTP drafter). Weights live in the repo's
-# gitignored models/ dir (same convention as the detector ONNXs); the image
-# only COPYs them — nothing downloads at build or run time.
+# VLM arbiter image — llama.cpp server (CUDA + flash attention, optional
+# MTP drafter). Ships Qwen3-VL-30B-A3B-Instruct Q4_K_XL; any llama.cpp-
+# compatible VLM (e.g. Gemma-4-12B-it + drafter, Qwen3-VL-8B) stays
+# ARG-swappable. Weights live in the repo's gitignored models/ dir (same
+# convention as the detector ONNXs); the image only COPYs them — nothing
+# downloads at build or run time.
 #
 # Multi-stage:
 #   builder  — llama.cpp v0.8.0 built from source, CUDA + FA all-quants,
@@ -9,13 +11,13 @@
 #   runtime  — CUDA runtime base, binaries + local weights
 #
 # One-time model download into the current directory (host):
-#   HF_TOKEN=... hf download unsloth/Qwen3-VL-8B-Instruct-GGUF \
-#     Qwen3-VL-8B-Instruct-Q8_0.gguf mmproj-BF16.gguf \
-#     --local-dir models/qwen3-vl-8b
+#   HF_TOKEN=... hf download unsloth/Qwen3-VL-30B-A3B-Instruct-GGUF \
+#     Qwen3-VL-30B-A3B-Instruct-UD-Q4_K_XL.gguf mmproj-BF16.gguf \
+#     --local-dir models/qwen3-vl-30b-a3b
 #
-# Build (defaults = Qwen3-VL-8B Q8_0 from models/qwen3-vl-8b):
+# Build (defaults = the shipped Qwen3-VL-30B-A3B Q4_K_XL):
 #   docker build -f vlm.Dockerfile \
-#     -t ghcr.io/darkstar1997/movie-trimmer-vlm-qwen3vl:v1 .
+#     -t ghcr.io/darkstar1997/movie-trimmer-vlm-qwen3vl-30b-a3b:v1 .
 # Any other candidate is ARGs away, e.g. Gemma-4-12B + its MTP drafter
 # (download gemma-4-12B-it-qat-UD-Q4_K_XL.gguf, mmproj-BF16.gguf,
 # mtp-gemma-4-12B-it.gguf into models/gemma-4-12b/ first):
@@ -37,10 +39,11 @@ ARG LLAMA_TAG=v0.8.0
 ARG CUDA_ARCH=89
 
 # candidate model, fully parameterized so one Dockerfile serves any
-# llama.cpp-compatible VLM: qwen3-vl-8b (no drafter) or gemma-4-12b (with
-# MTP drafter — empty DRAFT_FILE disables the speculative flags)
-ARG MODEL_DIR=models/qwen3-vl-8b
-ARG MODEL_FILE=Qwen3-VL-8B-Instruct-Q8_0.gguf
+# llama.cpp-compatible VLM (defaults = the shipped 30B MoE; e.g.
+# gemma-4-12b + MTP drafter via ARGs — empty DRAFT_FILE disables the
+# speculative flags)
+ARG MODEL_DIR=models/qwen3-vl-30b-a3b
+ARG MODEL_FILE=Qwen3-VL-30B-A3B-Instruct-UD-Q4_K_XL.gguf
 ARG MMPROJ_FILE=mmproj-BF16.gguf
 ARG DRAFT_FILE=
 

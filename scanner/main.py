@@ -211,7 +211,8 @@ def health():
     from .detector import _trt_available
     from .trt import gpu_slug, trt_slug
     from . import vlm as vlm_supervisor
-    vlm = resolve_vlm_path(config.DEFAULT_ARBITER_MODEL)
+    vlm_model = config.DEFAULT_ARBITER_MODEL
+    vlm = resolve_vlm_path(vlm_model) if vlm_model else ""
     return {
         "gpu": gpu_slug(),
         "tensorrt": trt_slug() if _trt_available() else "unavailable",
@@ -219,9 +220,9 @@ def health():
         "models": {name: Path(config.MODEL_DIR / fname).exists()
                    for name, (fname, _) in config.MODELS.items()},
         "vlm": {
-            "model": config.DEFAULT_ARBITER_MODEL,
+            "model": vlm_model or "(llama-server via ARBITER_BASE_URL)",
             "path": vlm,
-            "available": Path(vlm).is_dir(),
+            "available": bool(vlm) and Path(vlm).is_dir(),
             # on-demand server state — reported, never probed: /health
             # must not spawn the ~20GB model (vlm.acquire does that)
             "server": vlm_supervisor.status(),

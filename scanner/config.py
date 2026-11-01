@@ -194,9 +194,12 @@ CROWD_CACHE_DIR = os.environ.get(
 # edges, weak/companion/proxy NudeNet triggers — uncapped by default
 # (ARBITER_MAX_FRAMES > 0 re-enables striding caps).
 DEFAULT_ARBITER = False
-# Bare name resolved against VLM_DIR first (baked weights); an HF repo id
-# also works on a networked host (the container runs offline by design).
-DEFAULT_ARBITER_MODEL = "Qwen3-VL-8B-Instruct"
+# In-process (transformers) arbiter model: OPT-IN only, empty by default.
+# The supported arbiter is the llama-server sidecar (ARBITER_BASE_URL or the
+# on-demand supervisor with the 30B GGUF baked into the all-in-one image).
+# A non-empty value resolves against VLM_DIR first; an unresolved name fails
+# loud at scan time instead of downloading at runtime.
+DEFAULT_ARBITER_MODEL = ""
 ARBITER_WINDOW_BEFORE_S = 10.0  # sampled before each segment start
 ARBITER_WINDOW_AFTER_S = 45.0   # sampled after each segment end
 ARBITER_WINDOW_STEP_S = 1.0     # sample spacing inside windows
