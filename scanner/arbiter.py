@@ -594,6 +594,17 @@ def resolve_vlm_path(model_id: str) -> str:
     return model_id
 
 
+def is_hf_weights_dir(path: str | Path) -> bool:
+    """True if `path` is a transformers-loadable weights directory.
+
+    config.json is the canonical HF marker; a GGUF dir (llama-server
+    weights, e.g. the shipped qwen3-vl-30b-a3b) is deliberately NOT —
+    the in-process path must reject it instead of dying inside
+    AutoProcessor. Pure."""
+    p = Path(path)
+    return p.is_dir() and (p / "config.json").is_file()
+
+
 def _load_vlm(model_id: str):
     """Load (model, processor); bf16 on CUDA. Not cached across runs: the
     8B model holds ~17GB of VRAM, and parking it idle between scans would
@@ -731,15 +742,17 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
                 judge = _judge_with_http
             else:
                 resolved = resolve_vlm_path(model_id)
-                if not Path(resolved).is_dir():
+                if not is_hf_weights_dir(resolved):
                     raise RuntimeError(
-                        "arbiter requested without ARBITER_BASE_URL and no local "
-                        f"VLM weights at '{resolved}' (arbiter_model={model_id!r}). "
-                        "The supported arbiter is the llama-server sidecar "
-                        "(ARBITER_BASE_URL, or the on-demand supervisor with the "
-                        "30B GGUF baked into the all-in-one image). In-process "
-                        "transformers is opt-in: point arbiter_model at a local "
-                        "HF weights directory.")
+                        f"arbiter requested without ARBITER_BASE_URL and "
+                        f"'{resolved}' is not an HF weights dir "
+                        f"(arbiter_model={model_id!r}). The default "
+                        "Qwen3-VL-30B-A3B ships as GGUF for llama-server: "
+                        "set ARBITER_BASE_URL (or run the all-in-one image, "
+                        "whose supervisor owns the server). In-process "
+                        "transformers judging is opt-in — point arbiter_model "
+                        "at a local HF-format dir (config.json + "
+                        "safetensors). Nothing downloads at runtime.")
                 model, processor = _load_vlm(model_id)
                 loaded_transformers = True
 

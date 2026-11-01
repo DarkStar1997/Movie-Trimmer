@@ -194,12 +194,15 @@ CROWD_CACHE_DIR = os.environ.get(
 # edges, weak/companion/proxy NudeNet triggers — uncapped by default
 # (ARBITER_MAX_FRAMES > 0 re-enables striding caps).
 DEFAULT_ARBITER = False
-# In-process (transformers) arbiter model: OPT-IN only, empty by default.
-# The supported arbiter is the llama-server sidecar (ARBITER_BASE_URL or the
-# on-demand supervisor with the 30B GGUF baked into the all-in-one image).
-# A non-empty value resolves against VLM_DIR first; an unresolved name fails
-# loud at scan time instead of downloading at runtime.
-DEFAULT_ARBITER_MODEL = ""
+# Identity of the shipped arbiter: Qwen3-VL-30B-A3B-Instruct (UD-Q4_K_XL
+# GGUF), served by llama-server — the on-demand supervisor inside the
+# all-in-one container, or ARBITER_BASE_URL for an external sidecar. The
+# name resolves against VLM_DIR (models/qwen3-vl-30b-a3b) for /health and
+# result bookkeeping; the server owns the actual weights. In-process
+# transformers judging stays opt-in: pass arbiter_model pointing at a
+# local HF-format weights dir (config.json + safetensors), which the
+# GGUF dir is not — that misconfiguration fails loud, never downloads.
+DEFAULT_ARBITER_MODEL = "Qwen3-VL-30B-A3B"
 ARBITER_WINDOW_BEFORE_S = 10.0  # sampled before each segment start
 ARBITER_WINDOW_AFTER_S = 45.0   # sampled after each segment end
 ARBITER_WINDOW_STEP_S = 1.0     # sample spacing inside windows

@@ -8,7 +8,8 @@ import pytest
 from scanner.arbiter import (ARBITER_SYSTEM_PROMPT, ARBITER_USER_TEXT,
                              PlannedFrame, _cluster_hits, _subtract,
                              aggregate, http_request_body,
-                             http_response_text, parse_verdict,
+                             http_response_text, is_hf_weights_dir,
+                             parse_verdict,
                              plan_expansion, plan_frames, resolve_vlm_path)
 from scanner import config
 from scanner.temporal import SmoothingConfig
@@ -319,6 +320,36 @@ def test_resolve_vlm_path_falls_back_to_id(tmp_path, monkeypatch):
 
     monkeypatch.setattr(config, "VLM_DIR", tmp_path)
     assert resolve_vlm_path("Qwen3-VL-8B-Instruct") == "Qwen3-VL-8B-Instruct"
+
+
+def test_default_arbiter_model_resolves_to_shipped_gguf(tmp_path, monkeypatch):
+    """The config default must name the model we actually ship: the 30B
+    GGUF dir served by llama-server (matches case-insensitively)."""
+    import scanner.config as config
+
+    shipped = tmp_path / "qwen3-vl-30b-a3b"
+    shipped.mkdir()
+    monkeypatch.setattr(config, "VLM_DIR", tmp_path)
+
+    resolved = resolve_vlm_path(config.DEFAULT_ARBITER_MODEL)
+    assert resolved == str(shipped)
+    # GGUF dir: resolvable identity, but NOT in-process-loadable
+    assert not is_hf_weights_dir(resolved)
+
+
+def test_is_hf_weights_dir_requires_config_json(tmp_path):
+    hf = tmp_path / "some-hf-model"
+    hf.mkdir()
+    (hf / "config.json").touch()
+    (hf / "model.safetensors").touch()
+    gguf = tmp_path / "some-gguf-model"
+    gguf.mkdir()
+    (gguf / "model.gguf").touch()
+
+    assert is_hf_weights_dir(hf)
+    assert not is_hf_weights_dir(gguf)          # GGUF dir must be rejected
+    assert not is_hf_weights_dir(tmp_path / "absent")
+    assert not is_hf_weights_dir(tmp_path / "some-hf-model" / "config.json")
 
 
 # --- weak detector hits ----------------------------------------------------------
