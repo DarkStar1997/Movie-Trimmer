@@ -1,17 +1,28 @@
-# Gemma-4-12B-it VLM arbiter candidate — llama.cpp (CUDA + flash attention)
-# with mmproj vision and the MTP speculative drafter, all baked in.
+# Gemma-4-12B-it / Qwen3-VL-8B VLM arbiter candidates — llama.cpp (CUDA +
+# flash attention, optional MTP drafter). Weights live in the repo's
+# gitignored models/ dir (same convention as the detector ONNXs); the image
+# only COPYs them — nothing downloads at build or run time.
 #
 # Multi-stage:
-#   builder    — llama.cpp v0.8.0 built from source, CUDA + FA all-quants,
-#                arch pinned via CUDA_ARCH (default 89 = RTX 4090)
-#   downloader — model + mmproj + MTP drafter pulled from HF with hf_transfer
-#                (HF_TOKEN passed as a BuildKit secret, never baked in)
-#   runtime    — CUDA runtime base, binaries + weights only; nothing
-#                downloads at container start
+#   builder  — llama.cpp v0.8.0 built from source, CUDA + FA all-quants,
+#              arch pinned via CUDA_ARCH (default 89 = RTX 4090)
+#   runtime  — CUDA runtime base, binaries + local weights
 #
-# Build (token from the environment):
+# One-time model download into the current directory (host):
+#   HF_TOKEN=... hf download unsloth/Qwen3-VL-8B-Instruct-GGUF \
+#     Qwen3-VL-8B-Instruct-Q8_0.gguf mmproj-BF16.gguf \
+#     --local-dir models/qwen3-vl-8b
+#
+# Build (defaults = Qwen3-VL-8B Q8_0 from models/qwen3-vl-8b):
 #   docker build -f vlm.Dockerfile \
-#     --secret id=hf_token,env=HF_TOKEN \
+#     -t ghcr.io/darkstar1997/movie-trimmer-vlm-qwen3vl:v1 .
+# Any other candidate is ARGs away, e.g. Gemma-4-12B + its MTP drafter
+# (download gemma-4-12B-it-qat-UD-Q4_K_XL.gguf, mmproj-BF16.gguf,
+# mtp-gemma-4-12B-it.gguf into models/gemma-4-12b/ first):
+#   docker build -f vlm.Dockerfile \
+#     --build-arg MODEL_DIR=models/gemma-4-12b \
+#     --build-arg MODEL_FILE=gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \
+#     --build-arg DRAFT_FILE=mtp-gemma-4-12B-it.gguf \
 #     -t ghcr.io/darkstar1997/movie-trimmer-vlm-gemma:v1 .
 # Run:
 #   docker run --gpus all -p 8082:8082 \
@@ -24,6 +35,14 @@
 ARG CUDA_VERSION=13.0.1
 ARG LLAMA_TAG=v0.8.0
 ARG CUDA_ARCH=89
+
+# candidate model, fully parameterized so one Dockerfile serves any
+# llama.cpp-compatible VLM: qwen3-vl-8b (no drafter) or gemma-4-12b (with
+# MTP drafter — empty DRAFT_FILE disables the speculative flags)
+ARG MODEL_DIR=models/qwen3-vl-8b
+ARG MODEL_FILE=Qwen3-VL-8B-Instruct-Q8_0.gguf
+ARG MMPROJ_FILE=mmproj-BF16.gguf
+ARG DRAFT_FILE=
 
 # --- stage 1: build llama.cpp from source --------------------------------------
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04 AS builder
@@ -48,25 +67,9 @@ RUN cmake -S llama.cpp -B build \
         -DLLAMA_CURL=OFF \
     && cmake --build build --target llama-server -j"$(nproc)"
 
-# --- stage 2: download weights at full speed -----------------------------------
-# unsloth/gemma-4-12B-it-qat-GGUF (apache-2.0, public):
-#   gemma-4-12B-it-qat-UD-Q4_K_XL.gguf  6.7 GB  target (QAT, unsloth dynamic)
-#   mmproj-BF16.gguf                    175 MB  vision projector
-#   mtp-gemma-4-12B-it.gguf             253 MB  MTP drafter (smart Q4_0,
-#                                              root file -hf auto-detects)
-FROM python:3.12-slim AS downloader
-RUN pip install --no-cache-dir "huggingface_hub[hf_transfer]"
-WORKDIR /models
-RUN --mount=type=secret,id=hf_token \
-    HF_TOKEN="$(cat /run/secrets/hf_token)" \
-    HF_HUB_ENABLE_HF_TRANSFER=1 \
-    hf download unsloth/gemma-4-12B-it-qat-GGUF \
-        gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \
-        mmproj-BF16.gguf \
-        mtp-gemma-4-12B-it.gguf \
-        --local-dir /models
-
-# --- stage 3: runtime ------------------------------------------------------------
+# --- stage 2: runtime ------------------------------------------------------------
+# Weights come from the local models/ dir in the build context (one-time
+# host download, see header) — no network in this stage.
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu24.04 AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates libgomp1 \
@@ -76,18 +79,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # (plus the ggml/llama shared libs) — copy the whole bin dir together so the
 # $ORIGIN rpaths keep resolving
 COPY --from=builder /src/build/bin/ /opt/llama/
-COPY --from=downloader /models /models
 COPY docker/vlm-entrypoint.sh /usr/local/bin/entrypoint.sh
+# global ARGs must be re-declared per stage or they expand empty — an
+# empty MODEL_DIR once COPY'd the whole repo into the image (32GB lesson)
+ARG MODEL_DIR
+ARG MODEL_FILE
+ARG MMPROJ_FILE
+ARG DRAFT_FILE
+COPY --chown=1001:1001 ${MODEL_DIR}/ /models/
 RUN chmod +x /usr/local/bin/entrypoint.sh \
-    && chown -R llama:llama /models /opt/llama
+    && chown -R llama:llama /opt/llama
 USER llama
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     LD_LIBRARY_PATH=/opt/llama \
     PORT=8082 \
     HOST=0.0.0.0 \
-    MODEL=/models/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \
-    MMPROJ=/models/mmproj-BF16.gguf \
-    DRAFT=/models/mtp-gemma-4-12B-it.gguf \
+    MODEL=/models/${MODEL_FILE} \
+    MMPROJ=/models/${MMPROJ_FILE} \
+    DRAFT=${DRAFT_FILE:+/models/${DRAFT_FILE}} \
     CTX=8192 \
     PARALLEL=4 \
     EXTRA_ARGS=""

@@ -672,4 +672,30 @@ Qwen3-VL-8B stays. The llama.cpp serving stack is kept for the next
 candidate (e.g. a Qwen3-VL GGUF under the same harness would isolate
 serving-runtime from model bias).
 
+### Qwen3-VL-8B GGUF under the same harness (same day)
+
+`unsloth/Qwen3-VL-8B-Instruct-GGUF` Q8_0 + mmproj-BF16, same llama.cpp
+image, no drafter, weights local under `models/qwen3-vl-8b/` (the image
+COPYs them; global ARGs must be re-declared per Docker stage — an empty
+`${MODEL_DIR}` once COPY'd the whole repo into a 67 GB image).
+
+- Positives 4/4, controls 0/9 — parity with the production
+  transformers path on the decisive sets.
+- Contested ranges: 4 flips (dress-head 3482-3483 same as transformers;
+  sex-tail 3445-3446 new) — subject to this model's known borderline
+  flicker; the two new flips sit inside GT ranges, no FP risk.
+- Labels degrade: nearly every hit reads MALE_GENITALIA where
+  transformers says FEMALE_BREAST on the same frames/prompt — Q8
+  quantization or template interplay; overlay text would suffer if
+  adopted as-is.
+- Throughput: 0.366 s/frame single-stream, **0.101 s/frame at 4
+  concurrent** (saturates its 4 slots) vs 0.14 s/frame for the
+  production transformers batching — ~28% faster at 12.5 GB vs 17 GB.
+
+Verdict: llama.cpp serving wins on speed and memory at recall parity;
+transformers keeps label fidelity. Adopting it means an OpenAI-client
+arbiter path (currently in-process transformers) — worth doing only if
+the label degradation is understood first.
+
+
 
