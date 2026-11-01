@@ -19,9 +19,11 @@ import sys
 import time
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from build import (ALLINONE as DEFAULT_IMAGE,  # noqa: E402
+                   SCANNER as SCANNER_IMAGE, build)
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
-SCANNER_IMAGE = "ghcr.io/darkstar1997/movie-trimmer-scanner:v1"
-DEFAULT_IMAGE = "ghcr.io/darkstar1997/movie-trimmer:v1"
 DEFAULT_NAME = "movie-trimmer"
 PORT = 8081
 
@@ -48,12 +50,9 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.build:
-        print("[run] building scanner image...")
-        run("docker", "build", "-f", "scanner.Dockerfile",
-            "-t", SCANNER_IMAGE, ".")
+        build("scanner.Dockerfile", SCANNER_IMAGE)
         print("[run] building allinone image...")
-        run("docker", "build", "-f", "allinone.Dockerfile",
-            "-t", args.image, ".")
+        build("allinone.Dockerfile", args.image)
 
     if container_exists(args.name):
         print(f"[run] stopping + removing previous '{args.name}'...")
