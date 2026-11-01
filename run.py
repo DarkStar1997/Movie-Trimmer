@@ -7,8 +7,11 @@
 
 The container runs detached with --rm: `docker stop movie-trimmer`
 removes it completely — no compose project names, no orphaned
-containers. Volumes/env mirror docker-compose.yml exactly (engine
-cache, repo read-only at /movies, blur outputs).
+containers. Any OTHER container still publishing the API port (e.g. an
+old `docker compose up` mint with a generated name) is removed first —
+it squats the port this appliance owns. Volumes/env mirror
+docker-compose.yml exactly (engine cache, repo read-only at /movies,
+blur outputs).
 """
 from __future__ import annotations
 
@@ -39,6 +42,15 @@ def container_exists(name: str) -> bool:
     return bool(out)
 
 
+def port_holders(port: int) -> list[str]:
+    """Names of running containers publishing the host port."""
+    res = subprocess.run(
+        ["docker", "ps", "--filter", f"publish={port}",
+         "--format", "{{.Names}}"],
+        capture_output=True, text=True)
+    return res.stdout.split()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--build", action="store_true",
@@ -57,6 +69,13 @@ def main() -> int:
     if container_exists(args.name):
         print(f"[run] stopping + removing previous '{args.name}'...")
         run("docker", "rm", "-f", args.name)
+
+    # any other container publishing the port would fail docker run with
+    # 'port is already allocated' (e.g. an old compose-mint name) — the
+    # port belongs to this appliance, so clear it and say what was removed
+    for squatter in port_holders(PORT):
+        print(f"[run] :{PORT} held by '{squatter}' — removing it")
+        run("docker", "rm", "-f", squatter)
 
     run("docker", "run", "-d", "--rm",
         "--name", args.name,
