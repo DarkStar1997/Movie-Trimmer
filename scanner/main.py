@@ -3,7 +3,10 @@
 Endpoints:
   POST /scan       multipart `video` file OR `video_path` (volume-mounted),
                    plus optional JSON form fields `policy`, `smoothing`,
-                   `sample_fps`, `model`, `backend`
+                   `sample_fps`, `model`, `backend`, arbiter fields, and
+                   crowd fields (`crowd`, `crowd_title`, `crowd_year` —
+                   CringeMDB scene-guide timestamps as first-class
+                   segments, fail-soft)
   GET  /scan/{id}  status + result (segments in seconds)
   GET  /scans      list
   POST /blur       mask-precision blur render (stage C): segments from a
@@ -74,6 +77,9 @@ async def submit_scan(
     arbiter: bool = Form(config.DEFAULT_ARBITER),
     arbiter_model: str = Form(config.DEFAULT_ARBITER_MODEL),
     arbiter_mode: str = Form("verify"),
+    crowd: bool = Form(config.DEFAULT_CROWD),
+    crowd_title: str | None = Form(None),
+    crowd_year: int | None = Form(None),
 ):
     if model not in config.MODELS:
         raise HTTPException(400, f"unknown model {model!r}")
@@ -116,7 +122,8 @@ async def submit_scan(
         run_scan_job, scan_id, source, policy_overrides, smoothing_overrides,
         sample_fps, model, backend, fp32, workspace,
         track=track, arbiter=arbiter, arbiter_model=arbiter_model,
-        arbiter_mode=arbiter_mode)
+        arbiter_mode=arbiter_mode, crowd=crowd, crowd_title=crowd_title,
+        crowd_year=crowd_year)
 
     return JSONResponse({
         "scan_id": scan_id,

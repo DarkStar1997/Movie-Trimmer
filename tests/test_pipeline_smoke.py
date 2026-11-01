@@ -6,6 +6,7 @@ wiring, result shape) that unit tests miss."""
 import glob
 import subprocess
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -40,6 +41,43 @@ def test_run_scan_end_to_end():
     assert res["tracking"]["enabled"] is True
     assert res["tracking"]["bridged_samples"] == 0
     assert res["arbiter"] is None
+
+
+def test_run_scan_crowd_end_to_end(monkeypatch, tmp_path):
+    """crowd=True must flow through run_scan: block present, scene-guide
+    ranges merged as first-class segments (fetch monkeypatched — host
+    tests stay network-free). Guards the crowd wiring that a unit test
+    on crowd.py alone cannot see."""
+    import scanner.crowd as crowd_mod
+    from scanner.pipeline import run_scan
+    from scanner.policy import Policy
+    from scanner.temporal import SmoothingConfig
+
+    fixture = (Path(__file__).parent / "fixtures" /
+               "cringemdb_exmachina.html").read_text()
+    monkeypatch.setattr(crowd_mod, "fetch_page",
+                        lambda url, timeout: fixture)
+    monkeypatch.setattr("scanner.config.CROWD_CACHE_DIR", str(tmp_path))
+
+    with tempfile.TemporaryDirectory() as td:
+        clip = f"{td}/Ex.Machina.2015.smoke.mp4"
+        subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=size=640x270:rate=24",
+             "-t", "4", "-c:v", "libx264", "-pix_fmt", "yuv420p", clip],
+            check=True)
+        res = run_scan(clip, policy=Policy(), smoothing=SmoothingConfig(),
+                       sample_fps=2.0, model="320n", backend="ort",
+                       crowd=True)
+
+    cr = res["crowd"]
+    assert cr is not None and cr["error"] is None
+    assert cr["slug"] == "ex-machina-2015"
+    assert len(cr["entries"]) == 4 and len(cr["skipped"]) == 1
+    crowd_segs = [s for s in res["segments"]
+                  if any(str(l).startswith("cringemdb") for l in s["labels"])]
+    assert len(crowd_segs) == 4
+    assert res["crowd"].get("cached") is not True
 
 
 def test_open_decoder_double_enter_single_ffmpeg():

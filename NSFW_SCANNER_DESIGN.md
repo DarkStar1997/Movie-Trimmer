@@ -588,3 +588,51 @@ minutes (personseg auto-picked CPU ORT in-container). Backends are now TRT
 by default and fail loudly when TRT cannot init ("ort" remains an explicit
 host-test-only opt-in). The RF-DETR Seg Medium FP32 engine builds in ~12s
 and analysis of a 7s segment drops ~27s → ~1.5s.
+
+## 9. Stage D: crowd timestamps — CringeMDB scene guide (2026-11-01)
+
+`POST /scan` with `crowd=true` adds a third segment source: CringeMDB's
+crowd-sourced Scene-by-Scene guide, fetched at scan time. Community
+ranges become **first-class segments** — identical Stage C treatment to
+VLM-found blind spots: mask every person RF-DETR finds (tracking across
+keyframes), center-box fallback, and the red warning overlay reads
+`VULGARITY DETECTED / 90% CRINGEMDB:NUDITY` (category from the entry).
+
+Design decisions, each grounded in how the site actually behaves:
+
+- **Slug resolution, not search.** `cringemdb.com/search?q=` always
+  returns `[]` (useless), but slugs are deterministic:
+  `/movie/{title-dash-year}`. The movie title/year are parsed from the
+  filename (`Ex.Machina.2015.1080p.BluRay.x264.YIFY.mp4` → "Ex Machina",
+  2015), with `crowd_title`/`crowd_year` Form overrides for odd names.
+  A wrong slug 404s cleanly into the fail-soft block.
+- **Parsing.** Scenes are `<article class="sg-scene">` blocks; the
+  category comes from the `sg-dot {nudity|sex|violence}` CSS class (a
+  stable token), not display text. Times are `<strong>` + optional
+  "to" span; point scenes get `end = start`.
+- **Scope.** Only `CROWD_CATEGORIES` (default `nudity,sex`) become
+  segments — violence is out of this pipeline's scope and lands in the
+  result's `skipped` list for auditability.
+- **Add-only.** Crowd merges AFTER the arbiter and can never remove
+  detector/VLM-found segments — community data extends coverage, it
+  does not veto models.
+- **Fail-soft.** Fetch/parse/HTTP errors land in `result['crowd']
+  ['error']`; the scan proceeds. CringeMDB is an enhancement, not a
+  model — it must never fail a scan. HTML is cached under
+  `scan_workspaces/crowd_cache/{slug}.html` (config: `CROWD_*`).
+- **Honesty about accuracy.** Entries are unverified and "can be off by
+  a minute or so" (their words) — hence score 0.90 (below model
+  confidence), ±`CROWD_PAD_S` padding, and per-entry `desc` in the
+  result block for human audit.
+
+End-to-end validation on Ex Machina (live container): filename alone
+resolved `ex-machina-2015`, 4 in-scope entries (3 nudity + 1 sex) merged
+padded at exactly the scene ranges (3134.5–3139.5, 3195.5–3248.5,
+3299.5–3473.5, 3474.5–3491.5), the 1:29:52 violence entry skipped. A
+blur render of the dress-scene crowd segment showed the overlay
+(`VULGARITY DETECTED / 90% CRINGEMDB:NUDITY`, OCR-verified) and a
+tracked person mask whose pixels sit exactly on the 24px block grid
+(quantization error 0.4–1.6 vs 35–55 for source), absent before segment
+start. Host tests: 9 crowd unit tests on a saved real-page fixture plus
+an end-to-end `run_scan(crowd=true)` smoke test (98/98, network-free).
+

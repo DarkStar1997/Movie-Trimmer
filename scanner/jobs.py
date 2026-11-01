@@ -47,7 +47,10 @@ async def run_scan_job(scan_id: str, video_path: str,                       poli
                        workspace: Optional[Path] = None, *,
                        track: bool = True, arbiter: bool = False,
                        arbiter_model: Optional[str] = None,
-                       arbiter_mode: str = "verify") -> None:
+                       arbiter_mode: str = "verify",
+                       crowd: bool = False,
+                       crowd_title: Optional[str] = None,
+                       crowd_year: Optional[int] = None) -> None:
     """Background task: run the scan off the event loop, store the result."""
     entry = scan_store[scan_id]
     try:
@@ -61,7 +64,8 @@ async def run_scan_job(scan_id: str, video_path: str,                       poli
                 sample_fps=sample_fps, model=model,
                 backend=backend, fp32=fp32,
                 track=track, arbiter=arbiter,
-                arbiter_model=arbiter_model, arbiter_mode=arbiter_mode)
+                arbiter_model=arbiter_model, arbiter_mode=arbiter_mode,
+                crowd=crowd, crowd_title=crowd_title, crowd_year=crowd_year)
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, fn)
 

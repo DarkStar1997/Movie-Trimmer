@@ -181,6 +181,7 @@ def draw_warning(canvas_rgb: np.ndarray, label: str, score: float,
 def keyframe_masks_for(dets_per_frame, frames, policy, segmenter,
                        dilate_px: int, vlm_source: bool = False,
                        vlm_score: float = 0.9,
+                       src_label: str = "VLM",
                        track_state: dict | None = None
                        ) -> list[tuple[np.ndarray, str, float]]:
     """Per keyframe (mask, label, score) at analysis res for one batch.
@@ -206,8 +207,8 @@ def keyframe_masks_for(dets_per_frame, frames, policy, segmenter,
         label, score = "", 0.0
 
         if vlm_source:
-            # arbiter segment: no NudeNet boxes by construction — mask all
-            # persons; the VLM saw nudity, so err wide
+            # arbiter/crowd segment: no NudeNet boxes by construction —
+            # mask all persons; the source saw nudity, so err wide
             pmask = segmenter.all_persons(frame)
             if pmask is None or not pmask.any():
                 frac = config.BLUR_VLM_CENTER_FRAC
@@ -215,7 +216,7 @@ def keyframe_masks_for(dets_per_frame, frames, policy, segmenter,
                     np.asarray([(1 - frac) * w / 2, (1 - frac) * h / 2,
                                 (1 + frac) * w / 2, (1 + frac) * h / 2]),
                     w, h)
-            out.append((dilate_mask(pmask, dilate_px), "VLM", vlm_score))
+            out.append((dilate_mask(pmask, dilate_px), src_label, vlm_score))
             continue
 
         # strongest trigger-passing detection this frame (for the overlay)
@@ -261,7 +262,10 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
 
     label/score ride along for the warning overlay: the trigger label +
     score for detector segments, "VLM" + arbiter confidence for
-    arbiter-found segments (identified by 'arbiter' in seg['labels'])."""
+    arbiter-found segments (identified by 'arbiter' in seg['labels']),
+    "CRINGEMDB:<category>" + crowd score for community-timestamp
+    segments (labels starting with 'cringemdb'). Both non-detector
+    sources mask every person, with a center fallback."""
     kf_fps = config.BLUR_KEYFRAME_FPS
     # dilation covers keyframe-hold motion; scaled to the analysis resolution
     dilate_px = max(3, int(round(config.BLUR_MASK_DILATE_FRAC * aw)))
@@ -270,8 +274,13 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
         start, end = float(seg["start"]), float(seg["end"])
         entries: list[tuple] = []
         t0 = max(0.0, start - 0.5)
-        vlm = "arbiter" in (seg.get("labels") or {})
-        vlm_score = float(seg.get("mean_score") or 0.9)
+        labs = seg.get("labels") or {}
+        crowd_lab = next((l for l in labs if str(l).startswith("cringemdb")),
+                         None)
+        vlm = "arbiter" in labs or crowd_lab is not None
+        vlm_score = float(seg.get("mean_score")
+                          or (config.CROWD_SCORE if crowd_lab else 0.9))
+        src_label = crowd_lab.upper() if crowd_lab else "VLM"
         track_state: dict = {}
 
         def flush(frames, first_idx):
@@ -279,6 +288,7 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
             masks = keyframe_masks_for(results, frames, policy, segmenter,
                                        dilate_px, vlm_source=vlm,
                                        vlm_score=vlm_score,
+                                       src_label=src_label,
                                        track_state=track_state)
             for j, (m, label, score) in enumerate(masks):
                 if m.any():

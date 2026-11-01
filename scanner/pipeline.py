@@ -11,11 +11,13 @@ import logging
 import threading
 import time
 from collections import Counter
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
 from . import config
+from .crowd import fetch_crowd_segments, merge_crowd_segments
 from .arbiter import run_arbiter
 from .decode import (analysis_size, open_decoder, probe_duration,
                      probe_dimensions)
@@ -64,6 +66,9 @@ def run_scan(
     arbiter: bool = config.DEFAULT_ARBITER,
     arbiter_model: str = config.DEFAULT_ARBITER_MODEL,
     arbiter_mode: str = "verify",
+    crowd: bool = config.DEFAULT_CROWD,
+    crowd_title: str | None = None,
+    crowd_year: int | None = None,
 ) -> dict:
     """Scan one video; returns the result dict (see schemas.ScanResult)."""
     detector = registry.get(model or config.DEFAULT_MODEL, backend,
@@ -211,6 +216,18 @@ def run_scan(
             segments = _apply_arbiter(segments, arbiter_block)
             arbiter_block["segments_pre_arbiter"] = pre
 
+    # stage D: crowd timestamps (CringeMDB, opt-in, fail-soft) — merged
+    # AFTER the arbiter so community ranges can never remove model-found
+    # segments, only extend coverage. Same Stage C treatment downstream.
+    crowd_block: Optional[dict] = None
+    if crowd:
+        crowd_block = fetch_crowd_segments(
+            Path(video_path).name, title=crowd_title, year=crowd_year,
+            categories=config.CROWD_CATEGORIES, pad_s=config.CROWD_PAD_S,
+            cache_dir=Path(config.CROWD_CACHE_DIR))
+        if crowd_block["segments"]:
+            segments = merge_crowd_segments(segments, crowd_block)
+
     bridged_total = sum(bridge_only)
     wall = time.monotonic() - t0
 
@@ -244,6 +261,7 @@ def run_scan(
                 1 for s in segments if s.get("bridged_samples")),
         } if track else {"enabled": False, "bridged_samples": 0},
         "arbiter": arbiter_block,
+        "crowd": crowd_block,
         "wall_time_s": round(wall, 2),
         "infer_time_s": round(infer_s, 2),
     }

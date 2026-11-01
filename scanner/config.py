@@ -145,6 +145,25 @@ BLUR_STALL_TIMEOUT_S = float(os.environ.get("BLUR_STALL_TIMEOUT_S", "120"))
 # Writable output dir (bind-mount it; movies are mounted read-only)
 BLUR_OUTPUT_DIR = str(Path(os.environ.get("BLUR_OUTPUT_DIR", "blur_outputs")))
 
+# --- Stage D: crowd timestamps (CringeMDB, opt-in) -------------------------------
+# POST /scan with crowd=true: fetch the movie's Scene-by-Scene guide from
+# CringeMDB (slug resolved from the filename's Title.Year pattern) and
+# merge in-scope category ranges as first-class segments — same Stage C
+# treatment as VLM blind spots (all-person mask + tracking + overlay).
+# Fail-soft: fetch/parse errors are reported in result['crowd'], the scan
+# proceeds. Community entries are unverified and "off by a minute or so"
+# (their words) — add-only, never removes pipeline-found segments.
+DEFAULT_CROWD = False
+CROWD_CATEGORIES = tuple(
+    os.environ.get("CROWD_CATEGORIES", "nudity,sex").split(","))
+CROWD_PAD_S = float(os.environ.get("CROWD_PAD_S", "1.5"))
+CROWD_SCORE = 0.90          # overlay confidence shown for crowd segments
+CROWD_FETCH_TIMEOUT_S = float(os.environ.get("CROWD_FETCH_TIMEOUT_S", "15"))
+CROWD_CACHE_DIR = os.environ.get(
+    "CROWD_CACHE_DIR",
+    str(Path(os.environ.get("SCAN_WORKSPACE_DIR", "scan_workspaces"))
+        / "crowd_cache"))
+
 # --- Stage B: VLM arbiter (sparse Qwen3-VL pass) -------------------------------
 # Never every frame: verify N frames per final segment, sample windows around
 # segments (flicker gaps / short continuations), plus a coarse global sweep for
