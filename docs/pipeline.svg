@@ -1,0 +1,210 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1000" role="img" aria-labelledby="t d">
+<title id="t">Movie-Trimmer — NSFW detection &amp; blur pipeline</title>
+<desc id="d">One container, one GPU: detector, person gate, on-demand VLM arbiter, crowd timestamps, GPU blur render; verified host-side.</desc>
+<style>
+ text { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; }
+ .h1 { font-size: 25px; font-weight: 700; fill: #f1f5f9; }
+ .acc { fill: #38bdf8; }
+ .sub { font-size: 13px; fill: #8fa3bf; }
+ .lane { font-size: 10.5px; font-weight: 700; letter-spacing: 1.6px; fill: #7c93b3; }
+ .card { fill: #131d31; stroke: #24344d; stroke-width: 1; }
+ .plain { stroke: #64748b4d; }
+ .det { stroke: #1e9fd93d; } .gate { stroke: #a78bfa3d; }
+ .vlm { stroke: #fbbf243d; fill: #16182b; }
+ .crowd { stroke: #34d3993d; } .render { stroke: #fb923c3d; }
+ .verify { stroke: #38bdf83d; }
+ .tagbox { fill: #22d3ee; } .tagbox-g { fill: #a78bfa; } .tagbox-v { fill: #fbbf24; }
+ .tagbox-c { fill: #34d399; } .tagbox-s { fill: #e2e8f0; }
+ .tagbox-r { fill: #fb923c; } .tagbox-y { fill: #38bdf8; }
+ .tag { font-size: 10px; font-weight: 700; letter-spacing: .8px; fill: #0b1220; text-anchor: middle; }
+ .ct { font-size: 15px; font-weight: 700; fill: #f1f5f9; }
+ .cd { font-size: 12px; fill: #9db1cc; }
+ .note { font-size: 10.5px; fill: #fbbf24; }
+ .arr { stroke: #5b7699; stroke-width: 1.6; fill: none; }
+ .carr { stroke: #34d399; stroke-width: 1.4; fill: none; stroke-dasharray: 4 3; }
+ .vt { font-size: 11px; font-weight: 700; letter-spacing: 1.2px; fill: #7c93b3; }
+ .vl { font-size: 10px; fill: #8fa3bf; text-anchor: middle; }
+ .chipbox { fill: #131d31; stroke: #24344d; }
+ .chip { font-size: 11.5px; fill: #b9c8dd; }
+ .chipb { font-weight: 700; fill: #f1f5f9; }
+ .lg { font-size: 10.5px; fill: #7c93b3; }
+</style>
+<defs>
+ <marker id="ah" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+  <path d="M0,0 L7,3.5 L0,7 z" fill="#5b7699"/></marker>
+ <marker id="ag" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+  <path d="M0,0 L7,3.5 L0,7 z" fill="#34d399"/></marker>
+</defs>
+
+<rect x="0" y="0" width="1280" height="1000" fill="#0b1220"/>
+<text x="38" y="58" class="h1">Movie-Trimmer <tspan class="acc">—</tspan> NSFW detection &amp; blur pipeline</text>
+<text x="38" y="84" class="sub">One container, one GPU · scan → arbitrate → render → verify · validated end-to-end on two full movies</text>
+
+<!-- container boundary -->
+<rect x="16" y="112" width="1248" height="488" rx="20" fill="#0d1628" stroke="#2b3f5c" stroke-width="1.5"/>
+<rect x="24" y="104" width="212" height="16" fill="#0b1220"/>
+<text x="30" y="116" class="lane">ALL-IN-ONE CONTAINER · :8081</text>
+
+<!-- row 1 -->
+<rect x="38" y="150" width="170" height="178" rx="14" class="card plain"/>
+<text x="52" y="202" class="ct">Movie file</text>
+<text x="52" y="226" class="cd">Repo root, mounted</text>
+<text x="52" y="243" class="cd">read-only at /movies —</text>
+<text x="52" y="260" class="cd">the source can never</text>
+<text x="52" y="277" class="cd">be modified. Filename</text>
+<text x="52" y="294" class="cd">title+year also feeds</text>
+<text x="52" y="311" class="cd">crowd lookup.</text>
+
+<path d="M208 239 H244 M240 235 L248 239 L240 243" class="arr" marker-end="url(#ah)"/>
+
+<rect x="252" y="150" width="268" height="178" rx="14" class="card det"/>
+<rect x="316" y="141" width="140" height="18" rx="9" class="tagbox"/>
+<text x="386" y="154" class="tag">STAGE A · ALWAYS ON</text>
+<g stroke="#22d3ee" fill="none" stroke-width="1.4">
+ <rect x="268" y="170" width="30" height="16" rx="2.5"/>
+ <path d="M273 170 V186 M278 170 V186 M286 170 V186 M291 170 V186" stroke-width="1.1" opacity=".55"/>
+</g>
+<text x="268" y="212" class="ct">NudeNet detector</text>
+<text x="268" y="236" class="cd">TRT fp16 · 4 fps. Whole-timeline</text>
+<text x="268" y="253" class="cd">pass; a person-cluster tracker</text>
+<text x="268" y="270" class="cd">bridges sub-threshold flicker;</text>
+<text x="268" y="287" class="cd">smoothing emits trusted segments.</text>
+
+<path d="M520 239 H556 M552 235 L560 239 L552 243" class="arr" marker-end="url(#ah)"/>
+
+<rect x="564" y="150" width="268" height="178" rx="14" class="card gate"/>
+<rect x="603" y="141" width="90" height="18" rx="9" class="tagbox-g"/>
+<text x="648" y="154" class="tag">PERSON GATE</text>
+<g stroke="#a78bfa" fill="none" stroke-width="1.4">
+ <circle cx="584" cy="178" r="6.4"/>
+ <circle cx="584" cy="178" r="2.2" fill="#a78bfa" stroke="none"/>
+ <path d="M584 171.6 V168.6 M584 184.4 V187.4 M577.6 178 H574.6 M590.4 178 H593.4" stroke-width="1" opacity=".6"/>
+</g>
+<text x="580" y="212" class="ct">RF-DETR person pass</text>
+<text x="580" y="236" class="cd">TRT fp32 · 2 fps. Where is anyone</text>
+<text x="580" y="253" class="cd">on screen? Opens person ranges;</text>
+<text x="580" y="270" class="cd">recall audited 78/78 on explicit</text>
+<text x="580" y="287" class="cd">hits — no empty-hallway sweeps.</text>
+
+<path d="M832 239 H868 M864 235 L872 239 L864 243" class="arr" marker-end="url(#ah)"/>
+
+<rect x="876" y="150" width="366" height="178" rx="14" class="card vlm"/>
+<rect x="967" y="141" width="184" height="18" rx="9" class="tagbox-v"/>
+<text x="1059" y="154" class="tag">STAGE B · ON-DEMAND ~20 GB</text>
+<g stroke="#fbbf24" fill="none" stroke-width="1.5">
+ <path d="M892 178 Q899 170 906 178 T920 178"/>
+ <circle cx="900" cy="184" r="1.6" fill="#fbbf24" stroke="none"/>
+ <circle cx="906" cy="185.5" r="1.6" fill="#fbbf24" opacity=".8" stroke="none"/>
+ <circle cx="912" cy="184" r="1.6" fill="#fbbf24" opacity=".6" stroke="none"/>
+</g>
+<text x="892" y="212" class="ct">VLM arbiter — Qwen3-VL 30B</text>
+<text x="892" y="236" class="cd">llama-server, sweeps only person-gated territory:</text>
+<text x="892" y="253" class="cd">10 s global sweep · 1 s-grid windows hugging every</text>
+<text x="892" y="270" class="cd">trusted edge (10 s before / 45 s after) · ±10 s</text>
+<text x="892" y="287" class="cd">ungated expansion around new hits. Add-only: trusted</text>
+<text x="892" y="304" class="cd">ranges are never re-judged.</text>
+<text x="892" y="316" class="note">▲ up while judging · ▼ down after · idle 0 GB ·</text>
+<text x="892" y="329" class="note">failure = loud error block, never silent</text>
+
+<!-- row 2 -->
+<rect x="38" y="395" width="250" height="170" rx="14" class="card crowd"/>
+<rect x="109" y="386" width="108" height="18" rx="9" class="tagbox-c"/>
+<text x="163" y="399" class="tag">CROWD · OPT-IN</text>
+<text x="52" y="447" class="ct">CringeMDB scene guide</text>
+<text x="52" y="471" class="cd">Community nudity/sex</text>
+<text x="52" y="488" class="cd">timestamps, cached on disk,</text>
+<text x="52" y="505" class="cd">fail-soft. Padded and treated</text>
+<text x="52" y="522" class="cd">as trusted territory for the</text>
+<text x="52" y="539" class="cd">arbiter's edge windows.</text>
+
+<path d="M288 480 H324 M320 476 L328 480 L320 484" class="carr" marker-end="url(#ag)"/>
+
+<rect x="332" y="395" width="270" height="170" rx="14" class="card"/>
+<rect x="431" y="386" width="72" height="18" rx="9" class="tagbox-s"/>
+<text x="467" y="399" class="tag">SEGMENTS</text>
+<text x="346" y="447" class="ct">Labeled ranges (s)</text>
+<text x="346" y="471" class="cd">Merged, add-only, labeled by</text>
+<text x="346" y="488" class="cd">source — NudeNet class / arbiter /</text>
+<text x="346" y="505" class="cd">cringemdb. Labels are load-bearing:</text>
+<text x="346" y="522" class="cd">they route VLM segments to the</text>
+<text x="346" y="539" class="cd">mask-everyone render path.</text>
+
+<path d="M602 480 H638 M634 476 L642 480 L634 484" class="arr" marker-end="url(#ah)"/>
+
+<rect x="646" y="395" width="380" height="170" rx="14" class="card render"/>
+<rect x="741" y="386" width="190" height="18" rx="9" class="tagbox-r"/>
+<text x="836" y="399" class="tag">STAGE C · GPU-NATIVE RENDER</text>
+<g stroke="#fb923c" fill="none" stroke-width="1.4">
+ <rect x="662" y="413" width="13" height="12" rx="3"/>
+ <rect x="669" y="413" width="13" height="12" rx="3" fill="#0d1628"/>
+ <rect x="676" y="413" width="13" height="12" rx="3" fill="#131d31"/>
+ <path d="M679 416.5 L685 419 L679 421.5 Z" fill="#fb923c" stroke="none"/>
+</g>
+<text x="662" y="447" class="ct">Person-mask blur</text>
+<text x="662" y="471" class="cd">NVDEC → zero-copy torch → RF-DETR masks + tracking</text>
+<text x="662" y="488" class="cd">→ NVENC hevc. Full person masked (box fallback for</text>
+<text x="662" y="505" class="cd">close-ups); frames never touch the CPU; audio &amp; subs</text>
+<text x="662" y="522" class="cd">pass through bit-exact — no timeline drift. Red</text>
+<text x="662" y="539" class="cd">overlay tags every flagged frame.</text>
+
+<path d="M1026 480 H1062 M1058 476 L1066 480 L1058 484" class="arr" marker-end="url(#ah)"/>
+
+<rect x="1070" y="395" width="172" height="170" rx="14" class="card plain"/>
+<text x="1084" y="447" class="ct">Blurred copy</text>
+<text x="1084" y="471" class="cd">blur_outputs/</text>
+<text x="1084" y="488" class="cd">Same runtime, same</text>
+<text x="1084" y="505" class="cd">packets; masks only</text>
+<text x="1084" y="522" class="cd">where flagged.</text>
+
+<!-- arbiter -> segments elbow -->
+<path d="M1059 328 V360 H467 V385" class="arr" marker-end="url(#ah)"/>
+
+<!-- host -->
+<rect x="16" y="620" width="1248" height="130" rx="16" fill="none" stroke="#334760" stroke-width="1.5" stroke-dasharray="6 4"/>
+<rect x="24" y="612" width="246" height="16" fill="#0b1220"/>
+<text x="30" y="624" class="lane">HOST · INDEPENDENT VERIFICATION</text>
+<rect x="38" y="648" width="1204" height="78" rx="14" class="card verify"/>
+<rect x="52" y="639" width="90" height="18" rx="9" class="tagbox-y"/>
+<text x="97" y="652" class="tag">VERIFY GATE</text>
+<g stroke="#38bdf8" fill="none" stroke-width="2">
+ <path d="M52 682 L57 687 L64 677"/>
+ <path d="M78 681 H96 M91 676.5 L96 681 L91 685.5" stroke-width="1.3" opacity=".65"/>
+</g>
+<text x="110" y="685" class="ct">scripts/verify_blur.py — trusts nothing the pipeline says</text>
+<text x="52" y="706" class="cd">Re-checks the render against its source directly: bit-exact audio payload md5 · exact video packet count · full decode with -err_detect explode</text>
+<text x="52" y="723" class="cd">blur presence inside flagged segments (hot-pixel diff + texture crushing, raw-PTS frame matching) · blur absence in clean gaps</text>
+
+<!-- vram -->
+<rect x="16" y="770" width="1248" height="140" rx="14" fill="#101a2e" stroke="#24344d"/>
+<text x="34" y="798" class="vt">GPU MEMORY LIFECYCLE — RTX 4090 24 GB</text>
+<rect x="55"  y="875" width="170" height="5"  rx="2" fill="#334760"/>
+<rect x="255" y="870" width="170" height="10" rx="2" fill="#1e6fa8"/>
+<rect x="455" y="824" width="170" height="56" rx="2" fill="#b58a1d"/>
+<rect x="655" y="870" width="170" height="10" rx="2" fill="#1e6fa8"/>
+<rect x="855" y="858" width="170" height="22" rx="2" fill="#b05a2a"/>
+<rect x="1055" y="875" width="170" height="5"  rx="2" fill="#334760"/>
+<text x="140"  y="897" class="vl">idle · 0 GB</text>
+<text x="340"  y="897" class="vl">engines ~1.8 GB</text>
+<text x="540"  y="897" class="vl">+ VLM ~20 GB — arbiter only</text>
+<text x="740"  y="897" class="vl">engines ~1.8 GB</text>
+<text x="940"  y="897" class="vl">render: engines + nvenc</text>
+<text x="1140" y="897" class="vl">idle · 0 GB</text>
+
+<!-- chips -->
+<rect x="38" y="930" width="316" height="32" rx="16" class="chipbox"/>
+<text x="54" y="950" class="chip"><tspan class="chipb">Gone Girl</tspan> · 38 segs · 15,612 frames · 24/24</text>
+<rect x="366" y="930" width="316" height="32" rx="16" class="chipbox"/>
+<text x="382" y="950" class="chip"><tspan class="chipb">Saltburn</tspan> · 76 segs · 39,827 frames · 37/37</text>
+<rect x="694" y="930" width="170" height="32" rx="16" class="chipbox"/>
+<text x="710" y="950" class="chip"><tspan class="chipb">end-to-end</tspan> 34.3 min</text>
+<rect x="876" y="930" width="366" height="32" rx="16" class="chipbox"/>
+<text x="892" y="950" class="chip">models baked in · <tspan class="chipb">zero runtime downloads</tspan></text>
+
+<!-- legend -->
+<circle cx="42" cy="988" r="4" fill="#22d3ee"/><text x="52" y="992" class="lg">detector</text>
+<circle cx="140" cy="988" r="4" fill="#a78bfa"/><text x="150" y="992" class="lg">person gate</text>
+<circle cx="250" cy="988" r="4" fill="#fbbf24"/><text x="260" y="992" class="lg">VLM arbiter</text>
+<circle cx="360" cy="988" r="4" fill="#34d399"/><text x="370" y="992" class="lg">crowd</text>
+<circle cx="440" cy="988" r="4" fill="#fb923c"/><text x="450" y="992" class="lg">render</text>
+<circle cx="530" cy="988" r="4" fill="#38bdf8"/><text x="540" y="992" class="lg">verify</text>
+</svg>

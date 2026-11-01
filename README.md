@@ -9,7 +9,7 @@ audio and subtitles bit-exact. It began as a movie trimmer / subtitle merger
 The whole pipeline — detector, person gate, VLM arbiter, community
 timestamps, GPU blur render — runs in **one container** on one GPU.
 
-![pipeline](docs/pipeline.png)
+![pipeline](docs/pipeline.svg)
 
 Design principle throughout: **add-only**. Detector, crowd and VLM can each
 only add territory; nothing can shrink or remove a flagged range, so
