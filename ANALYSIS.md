@@ -88,3 +88,18 @@ correct subtitle timeline math. Jobs run as FastAPI `BackgroundTasks`, throttled
 2. H2 (async upload) + M1 (`-map`).
 3. H1 decision: single worker (README change) now, or jump straight to persistent job store.
 4. M3 retention/cleanup, then the L items as convenient.
+
+## Detector-candidate evaluation (Nov 2026) — both rejected
+
+Benchmarked `viddexa/nsfw-detection-2-mini` and `erax-ai/EraX-Anti-NSFW-V1.1`
+(n/s/m, ONNX→TRT fp32) against the production stack on all frames of both
+validated movies. NudeNet stays: 100% anatomy-segment recall at ~0 false-alarm
+minutes; nsfw2mini drops 31–40% of those segments at any sane FP budget;
+EraX never scores above 0.17 on real content (0.002 on NudeNet-certified
+anatomy). 60–68% of validated content is arbiter-only — nothing cheap covers
+the 30B's blind spots. Models, engines, and eval scripts removed from the
+tree; method and numbers preserved in git history (commit 0adcb87) and the
+session record. Lessons kept: modelopt fp16 corrupts classifier/YOLO heads
+(fp32 engines for score-critical models — same call personseg already made);
+the image's TRT_CACHE_DIR=/cache/trt is container-ephemeral, production
+survives via the /cache/trt volume mount.
