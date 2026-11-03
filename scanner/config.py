@@ -143,10 +143,11 @@ PERSON_SEG = {
     "resolution": 432,
 }
 # Blur render defaults. Blur region = person mask AND padded explicit box.
+# The render effect is solid black (mask-shaped), not mosaic: silhouettes
+# stayed legible under pixelation.
 BLUR_KEYFRAME_FPS = 8.0     # NudeNet+personseg rate inside flagged ranges
 BLUR_BOX_PAD_FRAC = 0.35    # explicit box padding before mask intersection
 BLUR_MASK_DILATE_FRAC = 0.012   # mask dilation, fraction of frame width
-BLUR_PIXELS = 24            # pixelate block size at 1080p (scaled by width)
 # Fallback chain, first usable wins. NB: av1_nvenc is deliberately absent —
 # it fails with -22 EINVAL on this host/driver even bare (rawvideo-pipe path),
 # while hevc/h264 accept the full quality args. libx264 = CPU last resort.
@@ -206,7 +207,12 @@ DEFAULT_ARBITER_MODEL = "Qwen3-VL-30B-A3B"
 ARBITER_WINDOW_BEFORE_S = 10.0  # sampled before each segment start
 ARBITER_WINDOW_AFTER_S = 45.0   # sampled after each segment end
 ARBITER_WINDOW_STEP_S = 1.0     # sample spacing inside windows
-ARBITER_SWEEP_EVERY_S = float(os.environ.get("ARBITER_SWEEP_EVERY_S", "10.0"))
+# 5s sweep: blind-spot resolution doubled from the original 10s (a flash
+# between slots shrinks from <=10s to <=5s undetectable); edges stay
+# 10/45/1 — the windows are the highest-yield trigger (47 of 82 new
+# segments across the two baseline movies). Sim: scripts/eval/
+# arbiter_coverage_sim.py
+ARBITER_SWEEP_EVERY_S = float(os.environ.get("ARBITER_SWEEP_EVERY_S", "5.0"))
 # 0 (default) = uncapped; >0 = hard cap, applied by striding not truncation
 ARBITER_MAX_FRAMES = int(os.environ.get("ARBITER_MAX_FRAMES", "0"))
 # Share of the cap reserved for the sweep when a cap is set — windows
@@ -231,9 +237,11 @@ ARBITER_WEAK_MAX_FRAMES = int(
     os.environ.get("ARBITER_WEAK_MAX_FRAMES", "120"))
 # Second pass: measure the extent of explicit point hits (sweep/weak) by
 # re-sampling their ±ARBITER_SWEEP_PAD_S neighborhood at window density.
-# Capped; highest-confidence hits expand first.
+# Capped; highest-confidence hits expand first. Both baseline movies
+# saturated 96 — doubled alongside the 5s sweep, which finds more
+# point hits worth expanding.
 ARBITER_EXPAND_MAX_FRAMES = int(
-    os.environ.get("ARBITER_EXPAND_MAX_FRAMES", "96"))
+    os.environ.get("ARBITER_EXPAND_MAX_FRAMES", "192"))
 ARBITER_MODES = ("verify", "apply")  # verify: annotate; apply: also merge
 # apply is the default: merging is add-only (VLM can never remove a
 # NudeNet/crowd segment), and a submission that forgets the mode must

@@ -157,7 +157,6 @@ async def submit_blur(
     window_end: float | None = Form(None,
                                     description="Render only until here (s)"),
     cq: int | None = Form(None, ge=1, le=51),
-    pixels: int | None = Form(None, ge=4, le=96),
 ):
     if not Path(video_path).exists():
         raise HTTPException(400, f"video_path not found: {video_path}")
@@ -179,7 +178,7 @@ async def submit_blur(
               else None)
     background_tasks.add_task(
         run_blur_job, blur_id, video_path, segs, policy_overrides,
-        window, cq, pixels)
+        window, cq)
     return JSONResponse({
         "blur_id": blur_id,
         "status": blur_store[blur_id]["status"],

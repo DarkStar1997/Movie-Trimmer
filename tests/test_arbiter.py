@@ -101,7 +101,7 @@ def test_plan_person_gate_limits_sweep_and_windows():
     segs = [{"start": 100.0, "end": 110.0}]
     planned = plan_frames(600.0, segs, person_ranges=[(200.0, 260.0)])
     sweep = [f for f in planned if f.reason == "sweep"]
-    assert len(sweep) == 7                    # grid 200,210,...,260
+    assert len(sweep) == 13                   # grid 200,205,...,260 (5s)
     for f in planned:
         if f.reason in ("sweep", "window"):
             assert 200.0 <= f.t <= 260.0, f.t

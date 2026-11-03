@@ -13,8 +13,8 @@ import tempfile
 import numpy as np
 import pytest
 
-from scanner.blur import (box_mask, dilate_mask, explicit_boxes,
-                          intersect_with_box, pad_box, pixelate,
+from scanner.blur import (blackout_rgb, box_mask, dilate_mask,
+                          explicit_boxes, intersect_with_box, pad_box,
                           _writer_args)
 from scanner.detector import Detection
 from scanner.personseg import PERSON_CLASS, decode, preprocess
@@ -134,14 +134,14 @@ def test_explicit_boxes_filters_by_policy():
     assert boxes[0].tolist() == [10, 10, 70, 50]
 
 
-def test_pixelate_only_inside_mask():
-    frame = np.zeros((32, 32, 3), dtype=np.uint8)
-    frame[:12] = 255                    # boundary at row 12 — NOT block-aligned
+def test_blackout_only_inside_mask():
+    rng = np.random.default_rng(7)
+    frame = rng.integers(0, 256, (32, 32, 3), dtype=np.uint8)
     mask = np.zeros((32, 32), dtype=bool)
-    mask[8:16, :8] = True               # the straddled 8px block rows 8-15
-    out = pixelate(frame, mask, 8)
-    # the straddled block averages white+black -> strictly between 0 and 255
-    assert ((out[8:16, :8] > 0) & (out[8:16, :8] < 255)).all()
+    mask[8:16, :8] = True               # silhouette-shaped region
+    out = blackout_rgb(frame, mask)
+    # inside: solid black, nothing legible
+    assert (out[8:16, :8] == 0).all()
     # every pixel outside the mask is untouched
     assert (out[~mask] == frame[~mask]).all()
 

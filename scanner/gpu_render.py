@@ -1,4 +1,4 @@
-"""Full-GPU-native blur render (stage C, production path).
+"""Full-GPU-native blackout render (stage C, production path).
 
 One continuous pass over the movie — there are no cut boundaries to get
 wrong (the stream-copy splice approach failed twice on ffmpeg's dts/pts
@@ -6,7 +6,7 @@ cut semantics; this design removes the class of failure entirely):
 
     CreateDemuxer -> CreateDecoder (NVDEC, device memory)
                   -> torch.from_dlpack(frame)        # NV12/P016 view, zero-copy
-                  -> in-place block pixelate of Y+UV through the held
+                  -> in-place solid-black fill of Y+UV through the held
                      person-mask (torch ops on the same CUDA surface)
                   -> CreateEncoder (NVENC, P5/hq, VBR + explicit CQ)
                   -> FFmpegMuxer (audio passthrough, bit-exact PTS; subtitle-bearing
@@ -38,7 +38,7 @@ def _torch_mask(mask_np: np.ndarray, device) -> "torch.Tensor":
 
 def render_gpu(video_path: str, out_path: str, segments: list[dict],
                per_seg: dict[int, list], w: int, h: int, aw: int, ah: int,
-               cq: int | None = None, pixels: int | None = None) -> dict:
+               cq: int | None = None) -> dict:
     """-> stats dict. Requires the container's GPU stack (torch + CUDA)."""
     import torch
     import PyNvVideoCodec as nvc
@@ -48,8 +48,6 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
 
     t_start = time.monotonic()
     cq = cq or config.BLUR_CQ
-    pixels = pixels or config.BLUR_PIXELS
-    block = max(2, int(round(pixels * w / 1920)))
     src_fps = probe_fps(video_path)
     # Bit-depth adapter: 8-bit sources decode to NV12 surfaces, 10-bit
     # (HEVC main10 etc.) to P016 — same Y + interleaved-UV layout, but
@@ -66,7 +64,6 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
     # samples MSB-aligned (10-bit << 6).
     enc_pf = "P010" if ten_bit else nvc.Pixel_Format.NV12.name
     word_dtype = torch.uint16 if ten_bit else torch.uint8
-    word_max = 65472 if ten_bit else 255            # 10-bit sample << 6
     lvl = (lambda v: v << 8) if ten_bit else (lambda v: v)  # 8-bit level -> word
 
     # PyNvVideoCodec 2.2.3 consumes Encode() inputs by calling
@@ -118,7 +115,6 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
 
     # full-res mask cache: (si, ki) -> (y bool (h,w), uv bool (h/2, w))
     mask_cache: dict[tuple, tuple] = {}
-    hu = h // 2
 
     def full_masks(si: int, ki: int):
         key = (si, ki)
@@ -136,22 +132,25 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
             mask_cache[key] = (my, muv)
         return mask_cache[key]
 
-    def pixelate_yuv(t: torch.Tensor, my: torch.Tensor,
+    # blackout fill levels: BT.709 limited-range black Y=16 with neutral
+    # chroma Cb=Cr=128 — the same convention the overlay outline uses, so
+    # 8- and 10-bit words both come out of lvl().
+    MASK_BLACK_Y = lvl(16)
+    MASK_NEUTRAL_UV = lvl(128)
+
+    def blackout_yuv(t: torch.Tensor, my: torch.Tensor,
                      muv: torch.Tensor) -> None:
+        """Solid black through the person silhouette mask. The mosaic this
+        replaced kept silhouettes (and bright-scene detail) legible; a
+        constant fill leaves nothing. promote -> where -> cast, the same
+        UInt16-safe path the overlay fill uses."""
         y, uv = t[:h], t[h:]
-        fy = y.unsqueeze(0).unsqueeze(0).float()
-        pooled = torch.nn.functional.avg_pool2d(fy, block)
-        up = torch.nn.functional.interpolate(
-            pooled, size=(h, w), mode="nearest")
-        y.copy_(torch.where(my, up.squeeze(0).squeeze(0).round().clamp(0, word_max),
-                             y).to(word_dtype))
-        fuv = uv.unsqueeze(0).unsqueeze(0).float()
-        pooled_u = torch.nn.functional.avg_pool2d(fuv, max(2, block // 2))
-        up_u = torch.nn.functional.interpolate(
-            pooled_u, size=(hu, w), mode="nearest")
+        y.copy_(torch.where(
+            my, torch.full_like(my, MASK_BLACK_Y, dtype=torch.float32),
+            y.float()).to(word_dtype))
         uv.copy_(torch.where(
-            muv, up_u.squeeze(0).squeeze(0).round().clamp(0, word_max),
-            uv).to(word_dtype))
+            muv, torch.full_like(muv, MASK_NEUTRAL_UV, dtype=torch.float32),
+            uv.float()).to(word_dtype))
 
     # warning overlay, NV12 / BT.709 limited range: pure red -> Y 63 Cb 102
     # Cr 240; black outline -> Y 16 Cb 128 Cr 128. Cached per (si, ki).
@@ -192,7 +191,7 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
         y, uv = t[:h], t[h:]
         # masked_fill_ is not implemented for UInt16 CUDA (torch 2.14 op
         # gap — same family as remainder/min/max) — fill via the same
-        # promote -> where -> cast path pixelate_yuv already uses
+        # promote -> where -> cast path blackout_yuv uses
         def fill(x: torch.Tensor, mask: torch.Tensor, value: int) -> None:
             x.copy_(torch.where(mask, torch.full_like(mask, value,
                                                       dtype=torch.float32),
@@ -242,7 +241,7 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
                             held = {"si": si, "ki": ki}
                         if not ten_bit:
                             surf = torch.from_dlpack(frame)
-                        pixelate_yuv(surf, *full_masks(si, ki))
+                        blackout_yuv(surf, *full_masks(si, ki))
                         ov = overlay_masks(si, ki)
                         if ov is not None:
                             composite_overlay(surf, ov)

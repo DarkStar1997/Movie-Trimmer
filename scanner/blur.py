@@ -1,11 +1,11 @@
-"""Stage C: mask-precision blur render.
+"""Stage C: mask-precision blackout render.
 
 Two passes over the movie:
 
   analysis (cheap, flagged ranges only)
     For each remove-segment, decode [start, end] at BLUR_KEYFRAME_FPS and
     analysis size (the scan's decode size — detection parity). Run NudeNet
-    per batch; per keyframe the blur mask is:
+    per batch; per keyframe the censor mask is:
 
       detector segments — union over trigger-passing boxes of the MATCHED
       person's full-body mask (the whole person is blurred, not just the
@@ -19,28 +19,30 @@ Two passes over the movie:
 
     Every masked keyframe carries (label, score) for the warning overlay;
     at render time each flagged frame gets red top-left text
-    "VULGARITY DETECTED / <conf>% <label>" (BLUR_OVERLAY kill-switch) —
-    the mosaic destroys texture, not silhouettes, so smooth/dim scenes
-    need a visible flag.
+    "VULGARITY DETECTED / <conf>% <label>" (BLUR_OVERLAY kill-switch) — a
+    black silhouette needs no help being invisible, but the flag tells the
+    viewer what happened and why a person-shaped void walks through the
+    scene.
 
     Masks are dilated at analysis resolution (covers keyframe-hold motion)
     and stored packed per keyframe timestamp.
 
   render (two modes)
     gpu-native (default, full renders): one continuous pass — NVDEC decode
-    to CUDA frames, torch.from_dlpack zero-copy NV12 view, in-place pixelate
-    through the held person mask, NVENC encode (hevc P5 hq, VBR + explicit
-    CQ), FFmpegMuxer with audio/subs passthrough and bit-exact PTS. No cut
-    boundaries exist, so none can be gotten wrong (the abandoned splice
-    approach failed twice on ffmpeg's copy-cut dts/pts semantics).
+    to CUDA frames, torch.from_dlpack zero-copy NV12 view, in-place
+    solid-black fill through the held person mask, NVENC encode (hevc P5
+    hq, VBR + explicit CQ), FFmpegMuxer with audio/subs passthrough and
+    bit-exact PTS. No cut boundaries exist, so none can be gotten wrong
+    (the abandoned splice approach failed twice on ffmpeg's copy-cut
+    dts/pts semantics).
     pipe (window previews): ffmpeg NVDEC full-res rawvideo pipe -> per frame
     inside a segment, take the most recent keyframe mask, upscale nearest to
-    full res, pixelate the full frame (block downscale/upscale) and composite
-    through the mask -> pipe into a second ffmpeg running NVENC with explicit
-    quality control (hevc_nvenc p5 hq, VBR -cq, spatial AQ — the ANALYSIS.md
-    finding was that NVENC defaults to ~2 Mbps; the CQ is set explicitly
-    here. av1_nvenc is empirically broken on this host's rawvideo path:
-    -22 EINVAL). Audio is stream-copied; subtitles pass through as mov_text.
+    full res, fill solid black through the mask -> pipe into a second ffmpeg
+    running NVENC with explicit quality control (hevc_nvenc p5 hq, VBR -cq,
+    spatial AQ — the ANALYSIS.md finding was that NVENC defaults to ~2 Mbps;
+    the CQ is set explicitly here. av1_nvenc is empirically broken on this
+    host's rawvideo path: -22 EINVAL). Audio is stream-copied; subtitles
+    pass through as mov_text.
 """
 
 from __future__ import annotations
@@ -169,21 +171,21 @@ def dilate_mask(mask: np.ndarray, kernel_px: int) -> np.ndarray:
     return cv2.dilate(mask.astype(np.uint8), k).astype(bool)
 
 
-def pixelate(frame: np.ndarray, mask: np.ndarray, block_px: int) -> np.ndarray:
-    """Block-pixelate `frame` inside `mask` (block_px at frame width)."""
-    if not mask.any() or block_px <= 1:
+def blackout_rgb(frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Solid black inside `mask` (person silhouette shape).
+
+    Replaced the block-mosaic pixelate: mosaic kept silhouettes legible
+    and bright scenes readable; a constant fill leaves nothing.
+    """
+    if not mask.any():
         return frame
-    h, w = frame.shape[:2]
-    down = cv2.resize(frame, (max(1, w // block_px), max(1, h // block_px)),
-                      interpolation=cv2.INTER_LINEAR)
-    pix = cv2.resize(down, (w, h), interpolation=cv2.INTER_NEAREST)
     out = frame.copy()
-    out[mask] = pix[mask]
+    out[mask] = 0
     return out
 
 
-# warning overlay: every flagged frame tells the viewer what happened,
-# even when the mosaic itself is invisible on ultra-smooth/dim scenes
+# warning overlay: every flagged frame tells the viewer what happened —
+# a black silhouette is unmissable, but the text says WHY it is there
 OVERLAY_HEAD = "VULGARITY DETECTED"
 OVERLAY_FILL_RGB = (255, 0, 0)     # pure red (RGB frame order)
 OVERLAY_OUTLINE_RGB = (0, 0, 0)    # black outline for contrast on red scenes
@@ -415,11 +417,11 @@ def _start_writer(video_path: str, out_path: str, w: int, h: int,
 
 def _render_range(video_path: str, t0: float, t1: float, w: int, h: int,
                   aw: int, ah: int, per_seg: dict, seg_bounds: list,
-                  starts: list, kf_index: dict, block_px: int,
+                  starts: list, kf_index: dict,
                   cq: int, codecs: tuple, out_path: str
                   ) -> tuple[int, int, str]:
-    """Decode [t0, t1), blur masked frames, write through NVENC (pipe path,
-    used for window previews). NVDEC wedge (known quirk) surfaces as
+    """Decode [t0, t1), black out masked frames, write through NVENC (pipe
+    path, used for window previews). NVDEC wedge (known quirk) surfaces as
     DecoderStalled; one CPU-decode retry, then fail loud."""
     fps_frac = probe_fps_fraction(video_path)
     src_fps = probe_fps(video_path)
@@ -452,7 +454,7 @@ def _render_range(video_path: str, t0: float, t1: float, w: int, h: int,
                                 interpolation=cv2.INTER_NEAREST).astype(bool),
                                 "label": entries[ki][2],
                                 "score": entries[ki][3]}
-                        frame = pixelate(frame, held["mask"], block_px)
+                        frame = blackout_rgb(frame, held["mask"])
                         if config.BLUR_OVERLAY:
                             draw_warning(frame, held["label"], held["score"])
                         frames_blurred += 1
@@ -477,12 +479,10 @@ def _render_range(video_path: str, t0: float, t1: float, w: int, h: int,
 def render_pass(video_path: str, out_path: str, segments: list[dict],
                 per_seg: dict[int, list], w: int, h: int, aw: int, ah: int,
                 window: tuple[float, float] | None,
-                cq: int = None, pixels: int = None) -> dict:
+                cq: int = None) -> dict:
     """Pipe-path render for window previews (small ranges; full renders use
     the GPU-native scanner/gpu_render.py)."""
     cq = cq or config.BLUR_CQ
-    pixels = pixels or config.BLUR_PIXELS
-    block_px = max(2, int(round(pixels * w / 1920)))
     seg_bounds = [(float(s["start"]), float(s["end"])) for s in segments]
     starts = [a for a, _ in seg_bounds]
     kf_index = {si: [e[0] for e in entries]
@@ -490,7 +490,7 @@ def render_pass(video_path: str, out_path: str, segments: list[dict],
 
     frames_out, frames_blurred, codec = _render_range(
         video_path, window[0], window[1], w, h, aw, ah, per_seg, seg_bounds,
-        starts, kf_index, block_px, cq, config.BLUR_CODECS,
+        starts, kf_index, cq, config.BLUR_CODECS,
         out_path=out_path)
     return {"frames": frames_out, "frames_blurred": frames_blurred,
             "codec": codec}
@@ -499,12 +499,13 @@ def render_pass(video_path: str, out_path: str, segments: list[dict],
 def run_blur(video_path: str, segments: list[dict], out_path: str, *,
              policy: Policy, backend: str = "trt",
              window: tuple[float, float] | None = None,
-             cq: int = None, pixels: int = None) -> dict:
+             cq: int = None) -> dict:
     """Full stage-C pipeline: analysis (masks) -> render.
 
     Full renders take the GPU-native path (NVDEC -> torch NV12 zero-copy ->
-    in-place pixelate -> NVENC, audio passthrough, one continuous pass — no
-    cut boundaries). A `window` takes the pipe-path preview render."""
+    in-place solid-black fill -> NVENC, audio passthrough, one continuous
+    pass — no cut boundaries). A `window` takes the pipe-path preview
+    render."""
     t0 = time.monotonic()
     if window is not None:
         a, b = window
@@ -539,7 +540,7 @@ def run_blur(video_path: str, segments: list[dict], out_path: str, *,
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     if window is not None:
         render = render_pass(video_path, out_path, segments, per_seg, w, h,
-                             aw, ah, window, cq=cq, pixels=pixels)
+                             aw, ah, window, cq=cq)
     else:
         from .gpu_render import render_gpu
         # subtitle-bearing sources render from a sub-free copy (video+audio
@@ -548,7 +549,7 @@ def run_blur(video_path: str, segments: list[dict], out_path: str, *,
                        if count_subtitle_streams(video_path) else video_path)
         try:
             render = render_gpu(render_path, out_path, segments, per_seg,
-                                w, h, aw, ah, cq=cq, pixels=pixels)
+                                w, h, aw, ah, cq=cq)
         finally:
             if render_path != video_path:
                 Path(render_path).unlink(missing_ok=True)

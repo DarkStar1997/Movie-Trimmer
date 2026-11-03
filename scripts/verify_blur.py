@@ -12,9 +12,10 @@ Checks:
   2. decode integrity: full decode with -err_detect explode
   3. timeline: video packet count == source packet count
   4. audio: packet pts/dts/size md5 identical (bit-exact passthrough)
-  5. blur presence: inside flagged segments, some plausible source
-     counterpart frame shows the blur diff and local texture is crushed
-  6. blur absence: clean-range frames match a source frame exactly
+  5. mask presence: inside flagged segments, some plausible source
+     counterpart frame shows the diff, the region went solid black,
+     and local texture is crushed
+  6. mask absence: clean-range frames match a source frame exactly
 
 Frames are grabbed by raw PTS (select between(t,...) with -copyts after a
 short input seek), so matching is immune to cross-codec -ss keyframe
@@ -156,14 +157,14 @@ def main():
                             .mean(axis=2).mean()), ps)
                      for ps in cands_near(t + 0.083, args.k)]
             plausible = [ps for m, ps in cands if m < 3.0]
-            # full-person-mask fallback: masks covering most of a frame
-            # legitimately push mean diff high (Gone Girl close-ups: 5-9;
-            # Saltburn's detail-dense party montage with a near-full-frame
-            # mask measured 16.2). The bound only pre-filters candidates —
-            # the hot-pixel and texture-crushing tests below are the real
-            # blur-vs-wrong-frame discriminators (a wrong frame is hot
-            # everywhere but NOT locally smoother), so it can be generous.
-            if not plausible and cands and min(cands)[0] < 24.0:
+            # full-person-mask fallback: the effect is solid black, so the
+            # frame mean diff is (mask fraction) x (scene brightness) — a
+            # near-full-frame mask on a bright scene (party montage) can
+            # push it past 60. The bound only pre-filters candidates —
+            # the hot-pixel, darkness and texture tests below are the real
+            # effect-vs-wrong-frame discriminators (a wrong frame is hot
+            # everywhere but NOT locally darker/smoother), so it is generous.
+            if not plausible and cands and min(cands)[0] < 96.0:
                 # full-person / VLM masks cover most of the frame and push
                 # the mean above 3.0 against EVERY source candidate (measured
                 # 5.4-9.4 on legit full-person masks). Fall back to the
@@ -180,14 +181,14 @@ def main():
             if pair is None:
                 if plausible:
                     # counterpart matched but ZERO hot pixels anywhere:
-                    # the frame is (near-)identical to source — the blur
+                    # the frame is (near-)identical to source — the mask
                     # is MISSING here, not unmatchable
-                    results.append(ok(f"blur present @ seg {i} ({t:.1f}s)",
+                    results.append(ok(f"mask present @ seg {i} ({t:.1f}s)",
                                       False,
-                                      "counterpart matched, no blur diff"
-                                      " (unblurred frame)"))
+                                      "counterpart matched, no mask diff"
+                                      " (unmasked frame)"))
                 else:
-                    results.append(ok(f"blur present @ seg {i} ({t:.1f}s)",
+                    results.append(ok(f"mask present @ seg {i} ({t:.1f}s)",
                                       False, "no plausible counterpart"))
                 continue
             src_frame, d = pair
@@ -199,10 +200,16 @@ def main():
                               cv2.COLOR_BGR2GRAY)
             sa, sb = local_std(ga), local_std(gb)
             smooth = sa < 6.0
+            # blackout assert: a meaningful share of the diff region is
+            # near-black in the output (the old mosaic preserved local
+            # mean, so it would fail this — deliberately).
+            frac_black = float((gb < 16).mean())
             results.append(ok(
-                f"blur present @ seg {i} ({t:.1f}s)",
-                len(ys) > 200 and (sb < 0.8 * sa or smooth),
-                f"{len(ys)} px, std {sa:.2f}->{sb:.2f}"
+                f"mask present @ seg {i} ({t:.1f}s)",
+                len(ys) > 200 and frac_black >= 0.2
+                and (sb < 0.8 * sa or smooth),
+                f"{len(ys)} px, black {frac_black:.0%}, "
+                f"std {sa:.2f}->{sb:.2f}"
                 + (" (source ultra-smooth)" if smooth else "")))
 
         for t in args.clean_t:

@@ -140,8 +140,7 @@ def resolve_segments(segments_json: Any, scan_id: str | None) -> list[dict]:
 
 async def run_blur_job(blur_id: str, video_path: str, segments: list[dict],
                         policy_overrides: Optional[dict],
-                        window: Optional[tuple], cq: Optional[int],
-                        pixels: Optional[int]) -> None:
+                        window: Optional[tuple], cq: Optional[int]) -> None:
     entry = blur_store[blur_id]
     try:
         async with blur_semaphore:
@@ -150,10 +149,10 @@ async def run_blur_job(blur_id: str, video_path: str, segments: list[dict],
             policy = Policy.from_overrides(policy_overrides)
             out_dir = Path(config.BLUR_OUTPUT_DIR)
             out_dir.mkdir(parents=True, exist_ok=True)
-            out = out_dir / f"blurred_{blur_id[:8]}.mp4"
+            out = out_dir / f"masked_{blur_id[:8]}.mp4"
             fn = functools.partial(
                 run_blur, video_path, segments, str(out), policy=policy,
-                window=window, cq=cq, pixels=pixels)
+                window=window, cq=cq)
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, fn)
             entry.update(result)

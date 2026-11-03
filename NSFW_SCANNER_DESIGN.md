@@ -422,6 +422,21 @@ the slivers every model does see (now covered). Raising coverage
 further needs a differently-biased model (e.g. ShieldGemma-2 second
 vote), not more mechanisms on this stack.
 
+### Sweep cadence 10s → 5s, expand cap 96 → 192 (2026-11-03)
+
+Coverage replay over both baseline movies (`scripts/eval/
+arbiter_coverage_sim.py` — replays the recorded frame-verdict plan under
+different cadences) showed the windows (10s before / 45s after @1s) were
+the highest-yield trigger — 47 of 82 arbiter-new segments — but point
+samples between sweep slots stayed the blind spot: a 10s grid can miss a
+flash by up to 10s of phase. Halving the slot to 5s halves the worst
+case; sim predicts ~2,749 planned frames on Saltburn (sweep 1223 /
+window 1518 / weak 8, vs 2,239 at 10s) for ~1,650s scan wall (~4.8×
+realtime, from 5.9×). Edges stay 10/45/1: denser windows buy boundary
+slivers, not new segments. `ARBITER_EXPAND_MAX_FRAMES` doubled 96 → 192
+because both movies saturated the old cap — measured extent beats the
+symmetric ±8s guess, so more expansion is pure win when budget allows.
+
 
 ## 8. Stage C: mask-precision blur render (empirical, 2026-10-31)
 
@@ -454,8 +469,19 @@ Masks are dilated (~1.2% of frame width) and stored packbits-compressed
 per keyframe, each carrying (label, score) for the overlay. **Render**
 (full movies: GPU-native path below) decodes the whole movie, and for
 frames inside a segment holds the most recent keyframe mask (upscaled
-nearest), pixelates through it (24 px blocks at 1080p), composites the
-warning overlay, and encodes with NVENC.
+nearest), fills solid black through it (the person silhouette), composites
+the warning overlay, and encodes with NVENC.
+
+### Solid-black masks, not mosaic (2026-11-03)
+
+The effect was a 24px block pixelate until this date. It was replaced by
+a constant fill through the same silhouette masks: the Ex Machina
+verification below had already measured the failure mode ("the 24px
+mosaic changes values by <30 for 98.7% of mask pixels" on smooth scenes)
+— but the decisive argument was the inverse: even where the mosaic *was*
+visible it kept silhouettes and bright-scene detail legible. Solid black
+(Y=16, neutral chroma, BT.709 limited range) leaves nothing. `BLUR_PIXELS`
+and the `pixels` API knob are gone; output files are `masked_{id8}.mp4`.
 
 ### Warning overlay (2026-11-01)
 
@@ -464,12 +490,14 @@ Every flagged frame carries red top-left text:
     VULGARITY DETECTED
     87%  FEMALE_BREAST_EXPOSED
 
-Rationale: the mosaic destroys *texture*, not *silhouettes* — on
-ultra-smooth/dim scenes the blur is nearly invisible, so the viewer needs
-an explicit, unmissable flag on exactly the frames the pipeline acted on.
+Rationale (mosaic era, 2026-11-01): the mosaic destroys *texture*, not
+*silhouettes* — on ultra-smooth/dim scenes the blur is nearly invisible.
+Since the 2026-11-03 solid-black switch the silhouette itself is
+unmissable; the flag now answers the other question — *why* a
+person-shaped void walks through the scene.
 Confidence is the triggering detection's score (or the arbiter's VLM
 confidence for arbiter-found segments, label `VLM`). Composited after the
-pixelate so the text stays crisp: pipe path draws via cv2 on RGB; the
+blackout fill so the text stays crisp: pipe path draws via cv2 on RGB; the
 GPU-native path builds the text canvas once per keyframe (cv2), converts
 to NV12 masks, and does two `masked_fill_` passes with BT.709
 limited-range constants (red Y63 Cb102 Cr240, black outline Y16 Cb128
@@ -626,8 +654,8 @@ get wrong:
 
     CreateDemuxer -> CreateDecoder (NVDEC, device memory)
                   -> torch.from_dlpack(frame)   # NV12 view, zero-copy
-                  -> in-place block pixelate of Y+UV through the held
-                     person mask (avg_pool + nearest-up + where, on GPU)
+                  -> in-place solid-black fill of Y+UV through the held
+                     person mask (where(mask, Y16/UV128), on GPU)
                   -> CreateEncoder (NVENC hevc, P5, high_quality tuning,
                      VBR + explicit CQ)
                   -> FFmpegMuxer (audio/subs passthrough, bit-exact PTS)

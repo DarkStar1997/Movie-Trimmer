@@ -141,7 +141,7 @@ covered: hevc 10-bit 16:9 and h264 8-bit 4:3.
 |---|---|
 | `POST /scan` | async scan (form: `video_path`, `arbiter`, `crowd`, `arbiter_mode=apply\|verify`, `sample_fps`, `policy`, `smoothing`, `track`, …) |
 | `GET /scan/{id}` | status + result JSON |
-| `POST /blur` | async render (form: `video_path`, `scan_id` or `segments`, `cq`, `pixels`, `window_start/end`) |
+| `POST /blur` | async render (form: `video_path`, `scan_id` or `segments`, `cq`, `window_start/end`) — solid-black person masks |
 | `GET /blur/{id}` | status → `output` path |
 | `GET /scans`, `GET /blurs` | lists |
 | `GET /health` | GPU/TRT state, models, on-demand VLM server state |
