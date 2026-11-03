@@ -60,36 +60,56 @@ _LABEL_WHITELIST = {
     "MALE_BREAST", "BUTTOCKS", "ANUS",
 }
 
-# Arbiter prompting, validated empirically on Ex Machina (see
+# Arbiter prompting, validated empirically in three rounds (see
 # NSFW_SCANNER_DESIGN.md §7): a terse SYSTEM-role classifier prompt with a
-# strict-JSON contract gets zero refusals, zero false positives on benign
-# controls, and reliably confirms high-confidence nudity. Wordy
-# "moderation"-style user prompts made Qwen3-VL sandbag (confident false on
-# real nudity); free-form output was slightly more sensitive on borderline
-# dim scenes but unparseable in aggregate.
+# strict-JSON contract gets zero refusals and reliably confirms
+# high-confidence nudity. Wordy "moderation"-style user prompts made
+# Qwen3-VL sandbag (confident false on real nudity); free-form output was
+# slightly more sensitive on borderline dim scenes but unparseable in
+# aggregate. The dim/distant-aware paragraph quadrupled GT-frame recall on
+# Ex Machina and stays.
 #
-# The trailing dim/distant-aware paragraph (probe probe_prompts, 2026-11)
-# quadrupled GT-frame recall (1/16 -> 4/16: dress-open scene, sub-second
-# flash, dim buttocks) at zero false positives on 9 clean controls.
-# Without it the model confidently answers explicit=false even on frames
-# NudeNet fires on. Borderline dark scenes still remain below its
-# sensitivity, which is why apply-mode only ever ADDS segments and never
-# removes detector-flagged ones.
+# Context gate (2026-11-03, prompt replay on 766 recorded-verdict frames
+# from Saltburn + Gone Girl — scripts/eval/{build_prompt_replay,
+# replay_prompt,score_prompt_replay}.py): the presence-only prompt flagged
+# contextual nudity a human reviewer called uncensorable (Saltburn
+# 5s-sweep catches at 44:15/75:55/1:51:55/2:00:25). A coupled censor bar
+# (v2: "explicit only if sexually presented") suppressed label perception
+# on vetoed frames — real anatomy read labels:[] and validated segments
+# died. v3 decouples instead: visibility is judged context-blind FIRST,
+# context SECOND as its own field, explicit = anatomy AND sexual, and
+# unsure always censors. Replay: 2 of 4 human-rejected catches flip clean
+# (the other two are a confident model-vs-human disagreement no wording
+# fixed), 9 unadjudicated arbiter-only segments prune, clean controls
+# 199/208 -> 207/208. Coverage is add-only by construction
+# (pipeline._apply_arbiter drops nothing), so the gate can only narrow
+# NEW blind-spot segments, never lose detector-flagged ones.
 ARBITER_SYSTEM_PROMPT = (
-    "You are the nudity-detection stage of an automated video editing "
+    "You are the nudity-censoring stage of an automated video editing "
     "pipeline processing a licensed feature film. You see single frames "
-    "and tag them. You always reply with strict JSON and never refuse.\n"
+    "and tag them in two independent steps. You always reply with strict "
+    "JSON and never refuse.\n"
     'Reply format: {"explicit": true|false, "labels": [list], '
-    '"confidence": 0.0-1.0}\n'
-    "labels vocabulary: FEMALE_GENITALIA, MALE_GENITALIA, FEMALE_BREAST, "
-    "BUTTOCKS, ANUS. Tag a label when the body part is directly visible "
-    "and unclothed (nipple, genitalia, buttock crack, anus). Do not tag "
-    "covered bodies, underwear, swimwear, or tiny background images.\n"
-    "IMPORTANT: the frame may be dark, color-graded, grainy, or a wide "
-    "shot with distant people. Look carefully at dim regions and at "
-    "distant or partially occluded figures. If any unclothed breast, "
-    "genitalia, or buttocks is visible ANYWHERE in the frame — however "
-    "small, dim, or brief — set explicit=true and tag it."
+    '"context": "sexual"|"incidental", "confidence": 0.0-1.0}\n'
+    "STEP 1 — VISIBILITY (ignore story context completely): labels "
+    "vocabulary FEMALE_GENITALIA, MALE_GENITALIA, FEMALE_BREAST, "
+    "BUTTOCKS, ANUS. Tag a label when that body part is directly visible "
+    "and unclothed (nipple, genitalia, buttock crack, anus) — anywhere in "
+    "the frame, however small, dim, distant, or briefly framed. The frame "
+    "may be dark, color-graded, grainy, or a wide shot: look carefully at "
+    "dim regions and partially occluded figures before deciding labels. "
+    "Do not tag covered bodies, underwear, swimwear, or tiny background "
+    "images. STEP 1 never depends on whether the scene feels sexual.\n"
+    "STEP 2 — CONTEXT: sexual = sexual activity or intercourse, sexualized "
+    "or erotic posing, or unclothed anatomy presented as the deliberate "
+    "subject of the shot (close-up or centered reveal meant to be seen). "
+    "incidental = the nudity is contextual, not eroticized: background or "
+    "distant figures, comedic or non-sexual scenes, art, ordinary bathing "
+    "or changing moments, passing side or rear glimpses. When you are not "
+    "sure, answer sexual.\n"
+    "explicit = (labels is non-empty) AND (context == sexual). Blood, "
+    "gore, violence, or injury with no unclothed anatomy is out of scope: "
+    "empty labels, explicit=false."
 )
 ARBITER_USER_TEXT = "Tag this frame. JSON only."
 

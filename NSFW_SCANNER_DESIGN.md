@@ -218,7 +218,8 @@ B) *implemented* — sparse Qwen3-VL-8B arbitration (`scanner/arbiter.py`):
 45s after, clipped between neighbours) + 60s global sweep, capped at 250
 frames by striding, never every frame. Strict-JSON moderation prompt,
 refusal-tolerant parsing; `arbiter_mode=verify` (annotate) or `apply`
-(add blind-spot segments, drop rejected). Model baked in — nothing
+(add blind-spot segments — add-only, `_apply_arbiter` drops nothing;
+rejected detector segments are annotated for audit, never removed). Model baked in — nothing
 downloads at runtime (HF_HUB_OFFLINE=1; weights re-shipped inside
 ghcr.io/darkstar1997/movie-trimmer-vlm-qwen3vl-30b-a3b:v1).
 C) RF-DETR Seg Medium person masks (re-shipped at
@@ -421,6 +422,34 @@ teal/orange grade defeats YCrCb rules). CringeMDB ranges span whole
 the slivers every model does see (now covered). Raising coverage
 further needs a differently-biased model (e.g. ShieldGemma-2 second
 vote), not more mechanisms on this stack.
+
+### Context-gated arbiter prompt (2026-11-03)
+
+The presence-only prompt ("if any unclothed anatomy is visible ANYWHERE —
+explicit=true") flagged contextual nudity a human reviewer called
+uncensorable: four 5s-sweep catches on Saltburn (00:44:15, 01:15:55,
+01:51:55, 02:00:25 — real anatomy, non-sexual scenes). Prompt replay
+harness (`scripts/eval/{build_prompt_replay,replay_prompt,
+score_prompt_replay}.py`): 766 recorded-verdict frames from Saltburn +
+Gone Girl re-judged through the production sidecar path, classes =
+human-rejected (fp4) / anatomy-GT / arbiter-born / clean controls; the
+old prompt reproduces its recording at 92% (ffmpeg re-extraction jitter
+is the floor).
+
+- A coupled censor bar (v2: "explicit only if sexually presented")
+  SUPPRESSED perception on vetoed frames — real anatomy read `labels:[]`
+  and validated segments died (anatomy retention 101→92, GG −5 segs).
+- v3 decouples: STEP 1 visibility context-blind (the dim/distant
+  sensitivity survives intact), STEP 2 context as its own field
+  (sexual/incidental), `explicit = anatomy AND sexual`, unsure→sexual,
+  gore-without-anatomy out of scope. Anatomy 94/107, controls 199→207/208,
+  2 of 4 human-rejected catches flip clean (the other two are a confident
+  model-vs-human disagreement no wording fixed — tried, backfired), 9
+  unadjudicated arbiter-only segments prune.
+- Because `_apply_arbiter` is add-only, the gate can only narrow NEW
+  blind-spot segments; detector-flagged coverage cannot regress. That
+  add-only invariant is the load-bearing safety net for any future
+  prompt tightening.
 
 ### Sweep cadence 10s → 5s, expand cap 96 → 192 (2026-11-03)
 
