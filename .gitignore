@@ -216,6 +216,7 @@ scan_workspaces/
 scans/*
 !scans/gt_*.json
 !scans/BASELINES.md
+!scans/REPLAY_AB.md
 !scans/guide_cache/
 mask_outputs/
 
