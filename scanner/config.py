@@ -145,7 +145,11 @@ PERSON_SEG = {
 # Blur render defaults. Blur region = person mask AND padded explicit box.
 # The render effect is solid black (mask-shaped), not mosaic: silhouettes
 # stayed legible under pixelation.
-BLUR_KEYFRAME_FPS = 8.0     # NudeNet+personseg rate inside flagged ranges
+# Mask keyframe rate inside flagged ranges. 0 (default) = EVERY FRAME at
+# the source's native fps (capped at 30) — per-frame segmentation gives
+# temporally stable silhouettes on motion; the old fixed 8fps rate made
+# held masks step/lag visibly. >0 = fixed analysis rate (economy mode).
+BLUR_KEYFRAME_FPS = 0.0
 BLUR_BOX_PAD_FRAC = 0.35    # explicit box padding before mask intersection
 BLUR_MASK_DILATE_FRAC = 0.012   # mask dilation, fraction of frame width
 # Fallback chain, first usable wins. NB: av1_nvenc is deliberately absent —

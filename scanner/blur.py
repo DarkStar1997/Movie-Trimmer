@@ -3,7 +3,8 @@
 Two passes over the movie:
 
   analysis (cheap, flagged ranges only)
-    For each remove-segment, decode [start, end] at BLUR_KEYFRAME_FPS and
+    For each remove-segment, decode [start, end] at BLUR_KEYFRAME_FPS
+    (default: every frame at native fps) and
     analysis size (the scan's decode size — detection parity). Run NudeNet
     per batch; per keyframe the censor mask is:
 
@@ -325,7 +326,7 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
     "CRINGEMDB:<category>" + crowd score for community-timestamp
     segments (labels starting with 'cringemdb'). Both non-detector
     sources mask every person, with a center fallback."""
-    kf_fps = config.BLUR_KEYFRAME_FPS
+    kf_fps = config.BLUR_KEYFRAME_FPS or min(probe_fps(video_path), 30.0)
     # dilation covers keyframe-hold motion; scaled to the analysis resolution
     dilate_px = max(3, int(round(config.BLUR_MASK_DILATE_FRAC * aw)))
     per_seg: dict[int, list] = {}
