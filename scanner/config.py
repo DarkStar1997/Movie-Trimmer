@@ -193,6 +193,22 @@ CROWD_CACHE_DIR = os.environ.get(
     str(Path(os.environ.get("SCAN_WORKSPACE_DIR", "scan_workspaces"))
         / "crowd_cache"))
 
+# --- Stage E: parents-guide film-context (IMDb, opt-in, experimental) -------------
+# POST /scan with guide=true: resolve the movie's IMDb Parents Guide and
+# append its Sex & Nudity items + community severity to the arbiter's
+# system prompt as tie-break-only background (STEP 1 visibility can never
+# be changed by it; empty block = byte-identical prompt). IMDb blocks
+# programmatic page fetches (Akamai), so guides are acquired
+# browser-assisted into GUIDE_CACHE_DIR/{tt}.json and read from cache;
+# a miss is a fail-soft no-op recorded in result['guide'].
+DEFAULT_GUIDE = False
+GUIDE_CACHE_DIR = Path(os.environ.get(
+    "GUIDE_CACHE_DIR",
+    str(Path(__file__).resolve().parent.parent / "scans" / "guide_cache")))
+GUIDE_FETCH_TIMEOUT_S = float(os.environ.get("GUIDE_FETCH_TIMEOUT_S", "15"))
+GUIDE_MAX_ITEMS = 12          # items in the prompt block
+GUIDE_ITEM_MAX_CHARS = 220    # per-item truncation
+
 # --- Stage B: VLM arbiter (sparse Qwen3-VL pass) -------------------------------
 # Never every frame: the person-gated sweep (10s grid where RF-DETR sees
 # a person, outside trusted NudeNet/crowd ranges), windows hugging trusted

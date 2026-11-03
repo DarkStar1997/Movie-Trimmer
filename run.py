@@ -87,6 +87,7 @@ def main() -> int:
         "-v", f"{ROOT}/mask_outputs:/mask_outputs",
         "-e", "ARBITER_HTTP_CONCURRENCY=4",
         "-e", "MASK_OUTPUT_DIR=/mask_outputs",
+        "-e", "GUIDE_CACHE_DIR=/movies/scans/guide_cache",
         args.image)
     print(f"[run] {args.name} up — http://localhost:{PORT}/health")
 

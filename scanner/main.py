@@ -92,6 +92,7 @@ async def submit_scan(
     crowd: bool = Form(config.DEFAULT_CROWD),
     crowd_title: str | None = Form(None),
     crowd_year: int | None = Form(None),
+    guide: bool = Form(config.DEFAULT_GUIDE),
 ):
     if model not in config.MODELS:
         raise HTTPException(400, f"unknown model {model!r}")
@@ -135,7 +136,7 @@ async def submit_scan(
         sample_fps, model, backend, fp32, workspace,
         track=track, arbiter=arbiter, arbiter_model=arbiter_model,
         arbiter_mode=arbiter_mode, crowd=crowd, crowd_title=crowd_title,
-        crowd_year=crowd_year)
+        crowd_year=crowd_year, guide=guide)
 
     return JSONResponse({
         "scan_id": scan_id,

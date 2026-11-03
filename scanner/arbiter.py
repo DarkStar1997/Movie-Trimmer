@@ -113,6 +113,15 @@ ARBITER_SYSTEM_PROMPT = (
 )
 ARBITER_USER_TEXT = "Tag this frame. JSON only."
 
+
+def film_context_block(film_context: str) -> str:
+    """Film-context additions appended to the system prompt ('' = none).
+
+    The context text itself (built by scanner.guide.context_block)
+    carries its own STEP-2-tie-break-only wording; this stays a pure
+    append so an empty context is byte-identical to v3."""
+    return f"\n\n{film_context}" if film_context else ""
+
 _REFUSAL_RE = re.compile(
     r"\b(i can(?:no|')t|cannot|can not|unable to|sorry|i won't|"
     r"not able to)\s+(help|assist|analyze|describe|provide|comply|identify)",
@@ -523,13 +532,16 @@ _HTTP_MAX_TOKENS = 120        # verdict JSON + template overhead (~20 measured)
 _THINK_KWARG_OK: bool | None = None   # None = probe; set after first response
 
 
-def http_request_body(image_b64: str, *, thinking_off: bool = True) -> dict:
+def http_request_body(image_b64: str, *, thinking_off: bool = True,
+                      film_context: str = "") -> dict:
     """Pure: /v1/chat/completions body for one frame (JPEG data URL)."""
     body: dict = {
         "max_tokens": _HTTP_MAX_TOKENS,
         "temperature": 0.0,
         "messages": [
-            {"role": "system", "content": ARBITER_SYSTEM_PROMPT},
+            {"role": "system",
+             "content": ARBITER_SYSTEM_PROMPT
+                        + film_context_block(film_context)},
             {"role": "user", "content": [
                 {"type": "image_url", "image_url": {
                     "url": f"data:image/jpeg;base64,{image_b64}"}},
@@ -550,14 +562,15 @@ def http_response_text(response: dict) -> str:
         return ""
 
 
-def _http_judge_one(url: str, path: Path) -> str:
+def _http_judge_one(url: str, path: Path, film_context: str = "") -> str:
     global _THINK_KWARG_OK
     b64 = base64.b64encode(path.read_bytes()).decode()
     attempts = ([_THINK_KWARG_OK] if _THINK_KWARG_OK is not None
                 else [True, False])
     for thinking_off in attempts:
         body = json.dumps(
-            http_request_body(b64, thinking_off=thinking_off)).encode()
+            http_request_body(b64, thinking_off=thinking_off,
+                              film_context=film_context)).encode()
         req = urllib.request.Request(
             url, data=body, headers={"Content-Type": "application/json"})
         try:
@@ -579,13 +592,15 @@ def _http_judge_one(url: str, path: Path) -> str:
     return ""
 
 
-def _judge_with_http(files: list[Path]) -> list[str]:
+def _judge_with_http(files: list[Path],
+                     film_context: str = "") -> list[str]:
     """Judge frames against the sidecar concurrently — its slots are the
     throughput unit (ARBITER_HTTP_CONCURRENCY should match them)."""
     url = config.ARBITER_BASE_URL.rstrip("/") + "/v1/chat/completions"
     with ThreadPoolExecutor(
             max_workers=config.ARBITER_HTTP_CONCURRENCY) as ex:
-        return list(ex.map(lambda f: _http_judge_one(url, f), files))
+        return list(ex.map(lambda f: _http_judge_one(url, f, film_context),
+                           files))
 
 
 # --- runner (lazy torch/transformers — runs in the container only) -------------
@@ -661,20 +676,23 @@ def _unload_vlm() -> None:
     logger.info("[arbiter] VLM unloaded")
 
 
-def _judge_with_vlm(files: list[Path], model_id: str) -> list[str]:
+def _judge_with_vlm(files: list[Path], model_id: str,
+                    film_context: str = "") -> list[str]:
     """Load, judge, and fully release the VLM. run_arbiter must never hold
     model references itself — see _unload_vlm."""
     model = processor = None
     try:
         model, processor = _load_vlm(model_id)
-        return _judge_batch(files, model, processor)
+        return _judge_batch(files, model, processor,
+                            film_context=film_context)
     finally:
         model = processor = None      # drop frame refs BEFORE unload
         _unload_vlm()
 
 
 def _judge_batch(files: list[Path], model, processor,
-                 batch_size: int = 8) -> list[str]:
+                 batch_size: int = 8, *,
+                 film_context: str = "") -> list[str]:
     """Raw model outputs for the frame files, batched.
 
     Two-step input prep (visiontouch pattern, proven on transformers
@@ -692,7 +710,9 @@ def _judge_batch(files: list[Path], model, processor,
             chunk = files[i:i + batch_size]
             images = [Image.open(f).convert("RGB") for f in chunk]
             prompts = [processor.apply_chat_template(
-                [{"role": "system", "content": ARBITER_SYSTEM_PROMPT},
+                [{"role": "system",
+                  "content": ARBITER_SYSTEM_PROMPT
+                             + film_context_block(film_context)},
                  {"role": "user", "content": [
                      {"type": "image", "image": img},
                      {"type": "text", "text": ARBITER_USER_TEXT}]}],
@@ -717,13 +737,17 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
                 companion_hits: list[float] = (),
                 person_ranges: list[tuple[float, float]] | None = None,
                 person_points: list[float] = (),
-                workdir: Path | None = None) -> dict:
+                workdir: Path | None = None,
+                film_context: str = "") -> dict:
     """Full sparse arbitration pass. Never raises: returns an error block.
 
     `segments` are the TRUSTED ranges (NudeNet detector + crowd): never
     sampled inside. `person_ranges` gates the sweep/windows (None = gate
     off or failed open = whole timeline). `person_points` are NudeNet
-    proxy-class hit times — body-part evidence that opens the gate."""
+    proxy-class hit times — body-part evidence that opens the gate.
+    `film_context` (guide=true) appends community parents-guide items
+    to the system prompt as STEP-2 tie-break background; '' keeps the
+    prompt byte-identical."""
     t0 = time.monotonic()
     result: dict = {"model": model_id, "mode": mode, "frames_checked": 0,
                     "refusals": 0, "segment_verdicts": [], "new_segments": [],
@@ -759,7 +783,9 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
             if config.ARBITER_BASE_URL:
                 result["backend"] = "http"
                 result["backend_url"] = config.ARBITER_BASE_URL
-                judge = _judge_with_http
+
+                def judge(fs: list[Path]) -> list[str]:
+                    return _judge_with_http(fs, film_context)
             else:
                 resolved = resolve_vlm_path(model_id)
                 if not is_hf_weights_dir(resolved):
@@ -777,7 +803,8 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
                 loaded_transformers = True
 
                 def judge(fs: list[Path]) -> list[str]:
-                    return _judge_batch(fs, model, processor)
+                    return _judge_batch(fs, model, processor,
+                                        film_context=film_context)
 
             raw = judge(files)
             all_planned = list(planned)

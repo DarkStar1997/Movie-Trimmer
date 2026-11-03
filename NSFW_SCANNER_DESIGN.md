@@ -572,6 +572,26 @@ verify or chapter job. `scripts/verify_blur.py` and
 `scripts/bake_mask_chapters.py` are deleted; `scripts/eval/` stays
 host-side (prompt dev tooling, not pipeline).
 
+### Parents-guide film-context for the arbiter (2026-11-04, experimental)
+
+`guide=true` on POST /scan: resolve the movie's IMDb Parents Guide and
+append its Sex & Nudity items + community severity to the arbiter's
+system prompt as STEP-2-tie-break-only background (the block's wording
+pins it to context ties; STEP 1 visibility can never be changed by it;
+an empty block keeps the prompt byte-identical — a regression test pins
+that). Motivation: borderline context calls are the v3 prompt's weakest
+joint (the model-vs-user disagreements on Saltburn 6715/7225), and
+community scene descriptions are exactly the evidence a human
+adjudicator uses. Access reality: IMDb walls programmatic fetches
+(Akamai 202/403 on the page AND api.graphql.imdb.com, verified with
+plain urllib, browser-UA curl, and headless + headed Chrome); ID
+resolution uses the open suggestion endpoint, and guides are acquired
+browser-assisted into scans/guide_cache/{tt}.json (Gone Girl, Saltburn,
+Wolf seeded for the A/B). Runtime is cache-first with a fail-soft live
+attempt; misses land in result['guide']['error']. The replay harness
+grew a v3guide variant (per-movie context batches); the gate for
+shipping it as default is zero new FPs on adjudicated-clean frames.
+
 ### Warning overlay (2026-11-01)
 
 Every flagged frame carries red top-left text:

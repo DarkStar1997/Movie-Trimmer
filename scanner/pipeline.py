@@ -21,6 +21,7 @@ import numpy as np
 
 from . import config
 from .crowd import fetch_crowd_segments, merge_crowd_segments
+from .guide import fetch_guide_context
 from .arbiter import run_arbiter
 from .decode import (analysis_size, open_decoder, probe_duration,
                      probe_dimensions)
@@ -96,6 +97,7 @@ def run_scan(
     crowd: bool = config.DEFAULT_CROWD,
     crowd_title: str | None = None,
     crowd_year: int | None = None,
+    guide: bool = config.DEFAULT_GUIDE,
 ) -> dict:
     """Scan one video; returns the result dict (see schemas.ScanResult)."""
     detector = registry.get(model or config.DEFAULT_MODEL, backend,
@@ -254,6 +256,16 @@ def run_scan(
         if crowd_block["segments"]:
             segments = merge_crowd_segments(segments, crowd_block)
 
+    # stage E: parents-guide film-context (IMDb, opt-in, fail-soft) —
+    # loaded BEFORE the arbiter so its Sex & Nudity items can serve as
+    # STEP-2 tie-break background in the system prompt. A miss (blocked
+    # fetch, no cache, no IMDb match) is recorded and the scan proceeds
+    # with the byte-identical context-free prompt.
+    guide_block: Optional[dict] = None
+    if guide:
+        guide_block = fetch_guide_context(
+            Path(video_path).name, title=crowd_title, year=crowd_year)
+
     # stage B: sparse VLM arbitration (opt-in; failure never fails the scan)
     # weak hits: cluster sub-threshold trigger bursts (<=2s gap) to their
     # peak sample, capped by striding — each peak is one targeted VLM frame.
@@ -278,7 +290,8 @@ def run_scan(
             model_id=arbiter_model, mode=arbiter_mode,
             weak_hits=[t for t, _, _ in weak_peaks],
             companion_hits=companions,
-            person_ranges=person_ranges, person_points=proxy_pts)
+            person_ranges=person_ranges, person_points=proxy_pts,
+            film_context=(guide_block or {}).get("context_block") or "")
         # apply-mode is ADD-ONLY: VLM-found blind-spot segments merge in,
         # but trusted (detector/crowd) segments are never removed on VLM
         # non-confirmation — measured Qwen3-VL behavior on dim scenes is
@@ -324,6 +337,7 @@ def run_scan(
         "arbiter": arbiter_block,
         "person_gate": gate_stats,
         "crowd": crowd_block,
+        "guide": guide_block,
         "wall_time_s": round(wall, 2),
         "infer_time_s": round(infer_s, 2),
     }

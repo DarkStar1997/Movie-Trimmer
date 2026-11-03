@@ -104,8 +104,44 @@ def judge_all(name, prompt):
     json.dump(out, open(OUT / f"replay_{name}.json", "w"))
 
 
+# v3guide — production v3 prompt + per-movie IMDb parents-guide
+# film-context (the scanner.guide wiring, replayed): frames split by
+# movie prefix, each batch judged with its own guide's context block.
+# Baseline for the A/B is a plain "v3" variant run in the same session.
+GUIDE_TT = {"GG": "tt2267998", "SB": "tt17351924"}
+
+
+def judge_all_guide(name):
+    from scanner.guide import context_block
+    files = sorted(FRAMES.glob("*.jpg"))
+    out = {}
+    t0 = time.time()
+    for movie, tt in GUIDE_TT.items():
+        batch = [f for f in files if f.name.startswith(movie + "_")]
+        if not batch:
+            continue
+        g = json.load(open(f"/movies/scans/guide_cache/{tt}.json"))
+        texts = arbiter._judge_with_http(batch, context_block(g))
+        for f, text in zip(batch, texts):
+            v = arbiter.parse_verdict(text)
+            out[f.name] = (None if v is None else
+                           {"explicit": v["explicit"],
+                            "labels": v["labels"],
+                            "confidence": round(v["confidence"], 2)})
+        print(f"[replay] {name}/{movie}: {len(batch)} frames "
+              f"(guide {tt})", flush=True)
+    dt = time.time() - t0
+    ref = sum(1 for v in out.values() if v is None)
+    print(f"[replay] {name}: {len(out)} frames in {dt:.0f}s, "
+          f"refusals {ref}", flush=True)
+    json.dump(out, open(OUT / f"replay_{name}.json", "w"))
+
+
 vlm.acquire()
-VARIANTS = [("v4", V3)]
+VARIANTS = []          # ("name", PROMPT) pairs — plain prompt variants
+GUIDE_VARIANTS = ["v3guide"]   # judged per-movie with guide context
 for name, prompt in VARIANTS:
     judge_all(name, prompt)
+for name in GUIDE_VARIANTS:
+    judge_all_guide(name)
 print("[replay] done")

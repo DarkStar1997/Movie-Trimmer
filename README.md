@@ -162,7 +162,7 @@ covered: hevc 10-bit 16:9 and h264 8-bit 4:3.
 
 | endpoint | purpose |
 |---|---|
-| `POST /scan` | async scan (form: `video_path`, `arbiter`, `crowd`, `arbiter_mode=apply\|verify`, `sample_fps`, `policy`, `smoothing`, `track`, …) |
+| `POST /scan` | async scan (form: `video_path`, `arbiter`, `crowd`, `guide`, `arbiter_mode=apply\|verify`, `sample_fps`, `policy`, `smoothing`, `track`, …) |
 | `GET /scan/{id}` | status + result JSON |
 | `POST /mask` | async render (form: `video_path`, `scan_id` or `segments`, `cq`, `window_start/end`, `output_name`, `bake_chapters`) — solid-black person masks + chapters |
 | `GET /mask/{id}` | status → `output` path, render stats, chapters |
@@ -185,6 +185,7 @@ Key env knobs (all have sane defaults; see `scanner/config.py`):
 | `ARBITER_EXPAND_MAX_FRAMES` | 96 | expansion budget around new hits |
 | `CROWD_CATEGORIES` | nudity,sex | in-scope crowd categories |
 | `CROWD_PAD_S` | 1.5 | padding around crowd ranges |
+| `GUIDE_CACHE_DIR` | scans/guide_cache | parents-guide context cache (guide=true; IMDb blocks live fetches, so guides are seeded here browser-assisted) |
 | `VLM_START_TIMEOUT_S` | 900 | llama-server bring-up budget |
 | `MASK_KEYFRAME_FPS` | 0 | mask analysis rate; 0 = every frame at native fps (capped 30) |
 | `MASK_OVERLAY` | 1 | red warning overlay on flagged frames |

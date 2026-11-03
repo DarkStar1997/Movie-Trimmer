@@ -28,5 +28,6 @@ services:
     environment:
       ARBITER_HTTP_CONCURRENCY: "4"
       MASK_OUTPUT_DIR: /mask_outputs
+      GUIDE_CACHE_DIR: /movies/scans/guide_cache
     gpus: all
     restart: unless-stopped
