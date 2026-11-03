@@ -1,5 +1,5 @@
 # All-in-one: the whole pipeline — scan -> VLM arbiter (llama-server on
-# loopback) -> crowd -> GPU blur render — in ONE container.
+# loopback) -> crowd -> GPU mask render — in ONE container.
 #
 #   docker compose up -d     # API on :8081, arbiter inside on 127.0.0.1
 #
@@ -24,9 +24,9 @@ services:
     volumes:
       - ./trt_cache:/cache/trt
       - ./:/movies:ro
-      - ./blur_outputs:/blur_outputs
+      - ./mask_outputs:/mask_outputs
     environment:
       ARBITER_HTTP_CONCURRENCY: "4"
-      BLUR_OUTPUT_DIR: /blur_outputs
+      MASK_OUTPUT_DIR: /mask_outputs
     gpus: all
     restart: unless-stopped

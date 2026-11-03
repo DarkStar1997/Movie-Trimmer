@@ -61,7 +61,7 @@ def demote_bridge_only(segments: list[dict],
                                                              list[dict]]:
     """Pure track-bridge segments (no sample carried a passing trigger
     label — only tracker-held sub-threshold flicker) are scan noise:
-    NudeNet re-detection at blur time finds nothing in them (Gone Girl
+    NudeNet re-detection at mask time finds nothing in them (Gone Girl
     2026-11-03: 7 such segments, every one a 0-keyframe no-op render).
     Demote them to review so remove-class renders never see them; the
     TRACK_BRIDGE label records provenance for review UIs. Labeled bridge
@@ -242,7 +242,7 @@ def run_scan(
             else "person gate off"}
 
     # stage C: crowd timestamps (CringeMDB, opt-in, fail-soft) — merged
-    # BEFORE the arbiter: crowd ranges are TRUSTED (blur-final), so the
+    # BEFORE the arbiter: crowd ranges are TRUSTED (mask-final), so the
     # VLM must not spend frames inside them either. Union-merge only:
     # community ranges can never remove model-found segments.
     crowd_block: Optional[dict] = None

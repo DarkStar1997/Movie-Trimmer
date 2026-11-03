@@ -538,6 +538,40 @@ visible it kept silhouettes and bright-scene detail legible. Solid black
 (Y=16, neutral chroma, BT.709 limited range) leaves nothing. `BLUR_PIXELS`
 and the `pixels` API knob are gone; output files are `masked_{id8}.mp4`.
 
+### Per-frame mask keyframes (2026-11-04)
+
+`MASK_KEYFRAME_FPS` default changed 8 → 0: every frame is segmented at
+the source's native fps (capped 30). The 8fps economy made the renderer
+hold each mask up to 125ms, so silhouettes stepped and lagged on motion
+— far more visible under solid black than it ever was under mosaic.
+Cost measured on Gone Girl's 29-segment re-render: 20,094 mask
+keyframes vs 5,612 at 8fps (3.6×) for +71s of wall time (585s vs 514s,
+214,355 frames) — the analysis stage overlaps GPU render and is not the
+bottleneck. Boundary jitter beyond per-frame segmentation (median-of-3,
+cross-fade) stays in reserve.
+
+### blur → mask rename + utility endpoints (2026-11-04)
+
+The stage began as Gaussian blur → mosaic → solid black; the name
+outlived the effect. Everything is "mask" now: `scanner/mask.py`,
+`POST /mask`, `GET /masks`, `mask_store`/`mask_id`, `MASK_*` config
+constants and envs (`MASK_OUTPUT_DIR`, `MASK_KEYFRAME_FPS`, …), stats
+`frames_masked`/`segments_masked`, host dir `mask_outputs/`.
+
+The host-side utility scripts became endpoints (they needed `docker
+exec` gymnastics only because they ran outside): `POST /verify` is the
+render gate (in-container, CPU; spot checks auto-derived from segment
+provenance — detector/crowd/arbiter + evenly-spread clean times), and
+`POST /chapters` bakes mask-region chapters (stream copy; `▶ MASK ·
+<label> <conf>%` + gap fillers so every mask is bracketed by seek-bar
+ticks in mpv). `POST /mask` gained `output_name` (sanitized basename —
+no post-render `docker exec mv`) and `bake_chapters=true` by default on
+full renders (window renders skip: offset timeline). Mask job entries
+now carry `video_path` + `segments`, so `mask_id` alone resolves a
+verify or chapter job. `scripts/verify_blur.py` and
+`scripts/bake_mask_chapters.py` are deleted; `scripts/eval/` stays
+host-side (prompt dev tooling, not pipeline).
+
 ### Warning overlay (2026-11-01)
 
 Every flagged frame carries red top-left text:

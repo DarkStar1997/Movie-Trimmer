@@ -121,7 +121,7 @@ TRACK_MAX_LOST_SAMPLES = 3    # coasting samples (~0.75s @4fps) before retiremen
 
 # --- Stage A2: RF-DETR person gate (arbiter pre-filter) -------------------------
 # Trusted-source policy: NudeNet detector segments and crowd ranges are
-# blur-final regardless of VLM opinion (apply mode is add-only), so the
+# mask-final regardless of VLM opinion (apply mode is add-only), so the
 # VLM never samples INSIDE them. And a frame with no person cannot host
 # explicit content, so the VLM sweep only runs where RF-DETR medium sees
 # somebody (PERSON_GATE_*), OR where NudeNet itself fired a body-part
@@ -136,7 +136,7 @@ PERSON_GATE_CLOSE_GAP_SAMPLES = 4   # 2s absent closes it (brief occlusion)
 PERSON_GATE_PROXY_SCORE = float(
     os.environ.get("PERSON_GATE_PROXY_SCORE", "0.30"))
 
-# --- Stage C: person segmentation + blur render --------------------------------
+# --- Stage C: person segmentation + mask render --------------------------------
 # RF-DETR Seg Medium (COCO person class only at runtime; FP32 TRT engine).
 PERSON_SEG = {
     "onnx": "person_seg_rfdetr_seg_medium_v1.onnx",
@@ -149,30 +149,30 @@ PERSON_SEG = {
 # the source's native fps (capped at 30) — per-frame segmentation gives
 # temporally stable silhouettes on motion; the old fixed 8fps rate made
 # held masks step/lag visibly. >0 = fixed analysis rate (economy mode).
-BLUR_KEYFRAME_FPS = 0.0
-BLUR_BOX_PAD_FRAC = 0.35    # explicit box padding before mask intersection
-BLUR_MASK_DILATE_FRAC = 0.012   # mask dilation, fraction of frame width
+MASK_KEYFRAME_FPS = 0.0
+MASK_BOX_PAD_FRAC = 0.35    # explicit box padding before mask intersection
+MASK_DILATE_FRAC = 0.012   # mask dilation, fraction of frame width
 # Fallback chain, first usable wins. NB: av1_nvenc is deliberately absent —
 # it fails with -22 EINVAL on this host/driver even bare (rawvideo-pipe path),
 # while hevc/h264 accept the full quality args. libx264 = CPU last resort.
-BLUR_CODECS = ("hevc_nvenc", "h264_nvenc", "libx264")
-BLUR_CQ = 26                # NVENC constant-quality (libx264 crf equivalent)
+MASK_CODECS = ("hevc_nvenc", "h264_nvenc", "libx264")
+MASK_CQ = 26                # NVENC constant-quality (libx264 crf equivalent)
 # Warning overlay: every flagged frame in the final render carries red
 # top-left text "VULGARITY DETECTED" + confidence% + label. This is the
 # remedy for mosaic-invisible misses on ultra-smooth/dim scenes: the
-# viewer always sees WHAT was flagged even when the blur itself is subtle.
-# Env kill-switch: BLUR_OVERLAY=0 disables.
-BLUR_OVERLAY = os.environ.get("BLUR_OVERLAY", "1").lower() not in (
+# viewer always sees WHAT was flagged even when the mask itself is subtle.
+# Env kill-switch: MASK_OVERLAY=0 disables.
+MASK_OVERLAY = os.environ.get("MASK_OVERLAY", "1").lower() not in (
     "0", "false", "no", "off")
 # VLM-sourced (arbiter-found) segments have no NudeNet box; when the person
 # segmenter also finds nobody (extreme close-ups), mask this fraction of the
 # frame centered — conservative by design (VLM confidence is >=0.9 there).
-BLUR_VLM_CENTER_FRAC = 0.7
+MASK_VLM_CENTER_FRAC = 0.7
 # Kill a decode that produced no frame for this long (NVDEC wedge quirk)
 # instead of blocking the job forever; pipe-path callers retry once on CPU.
-BLUR_STALL_TIMEOUT_S = float(os.environ.get("BLUR_STALL_TIMEOUT_S", "120"))
+MASK_STALL_TIMEOUT_S = float(os.environ.get("MASK_STALL_TIMEOUT_S", "120"))
 # Writable output dir (bind-mount it; movies are mounted read-only)
-BLUR_OUTPUT_DIR = str(Path(os.environ.get("BLUR_OUTPUT_DIR", "blur_outputs")))
+MASK_OUTPUT_DIR = str(Path(os.environ.get("MASK_OUTPUT_DIR", "mask_outputs")))
 
 # --- Stage D: crowd timestamps (CringeMDB, opt-in) -------------------------------
 # POST /scan with crowd=true: fetch the movie's Scene-by-Scene guide from

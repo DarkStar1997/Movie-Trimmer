@@ -12,7 +12,7 @@ Structure (pure functions first, heavy runner last):
                    so the module is importable in the torch-free host venv.
 
 Planning policy (trusted sources + person gate; see config):
-  - trusted: NudeNet detector segments + crowd ranges are blur-final
+  - trusted: NudeNet detector segments + crowd ranges are mask-final
     regardless of VLM opinion (apply mode is add-only) — NEVER sampled
   - person gate: the RF-DETR pass (scanner/persongate.py) marks where
     anybody is on screen; NudeNet proxy-class hits (body-part
@@ -145,7 +145,7 @@ def plan_frames(duration: float, segments: list[dict], *,
     """Curate the sparse VLM frame list.
 
     Trusted-source policy: `segments` here are NudeNet-detector + crowd
-    ranges, blur-final regardless of VLM opinion (apply mode is
+    ranges, mask-final regardless of VLM opinion (apply mode is
     add-only) — the VLM NEVER samples inside them. It watches only where
     they don't fire AND (person gate) where somebody is present:
     `person_ranges` from the RF-DETR pass (None = gate off or failed

@@ -11,7 +11,7 @@ containers. Any OTHER container still publishing the API port (e.g. an
 old `docker compose up` mint with a generated name) is removed first —
 it squats the port this appliance owns. Volumes/env mirror
 docker-compose.yml exactly (engine cache, repo read-only at /movies,
-blur outputs).
+mask outputs).
 """
 from __future__ import annotations
 
@@ -84,9 +84,9 @@ def main() -> int:
         "-p", f"{PORT}:{PORT}",
         "-v", f"{ROOT}/trt_cache:/cache/trt",
         "-v", f"{ROOT}:/movies:ro",
-        "-v", f"{ROOT}/blur_outputs:/blur_outputs",
+        "-v", f"{ROOT}/mask_outputs:/mask_outputs",
         "-e", "ARBITER_HTTP_CONCURRENCY=4",
-        "-e", "BLUR_OUTPUT_DIR=/blur_outputs",
+        "-e", "MASK_OUTPUT_DIR=/mask_outputs",
         args.image)
     print(f"[run] {args.name} up — http://localhost:{PORT}/health")
 

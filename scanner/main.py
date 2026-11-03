@@ -9,11 +9,20 @@ Endpoints:
                    segments, fail-soft)
   GET  /scan/{id}  status + result (segments in seconds)
   GET  /scans      list
-  POST /blur       mask-precision blur render (stage C): segments from a
+  POST /mask       mask-precision mask render (stage C): segments from a
                    completed scan_id or explicit JSON; optional preview
-                   window; NVDEC decode, NVENC encode with explicit CQ
-  GET  /blur/{id}  status + output path
-  GET  /blurs      list
+                   window, output_name, and automatic chapter bake;
+                   NVDEC decode, NVENC encode with explicit CQ
+  GET  /mask/{id}  status + output path
+  GET  /masks      list
+  POST /verify     render gate: source vs render (container, decode,
+                   timeline, audio md5, mask presence/absence spot
+                   checks); spots auto-derived from segment provenance
+  GET  /verify/{id}  status + report
+  GET  /verifies   list
+  POST /chapters   bake mask-region chapters into a render in place
+                   (stream copy; also automatic on full mask renders)
+  GET  /chapters/{id}  status + summary
   GET  /health     gpu/engine/model diagnostics
 
 Run single-worker only (in-memory job store):
@@ -32,8 +41,11 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadF
 from fastapi.responses import JSONResponse
 
 from . import config
-from .jobs import (blur_store, new_blur_entry, new_scan_entry, resolve_segments,
-                   run_blur_job, run_scan_job, scan_store)
+from .jobs import (chapters_store, mask_store, new_chapters_entry,
+                   new_mask_entry, new_scan_entry, new_verify_entry,
+                   resolve_segments, run_chapters_job, run_mask_job,
+                   run_scan_job, run_verify_job, safe_output_name,
+                   scan_store, verify_store)
 from .pipeline import registry
 from .schemas import ScanResult
 
@@ -141,8 +153,15 @@ def get_scan(scan_id: str):
     return scan_store[scan_id]
 
 
-@app.post("/blur", status_code=202)
-async def submit_blur(
+def _safe_output_name(name: str) -> str:
+    try:
+        return safe_output_name(name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/mask", status_code=202)
+async def submit_mask(
     background_tasks: BackgroundTasks,
     video_path: str = Form(..., description="Path to a mounted video"),
     segments: str | None = Form(None,
@@ -157,46 +176,180 @@ async def submit_blur(
     window_end: float | None = Form(None,
                                     description="Render only until here (s)"),
     cq: int | None = Form(None, ge=1, le=51),
+    output_name: str | None = Form(None,
+                                    description="Final filename in the "
+                                                "output dir (basename)"),
+    bake_chapters: bool = Form(True,
+                                description="Bake mask-region chapters "
+                                            "into the render (full movies)"),
 ):
     if not Path(video_path).exists():
         raise HTTPException(400, f"video_path not found: {video_path}")
     if (window_start is None) != (window_end is None):
         raise HTTPException(400, "window_start and window_end come together")
+    if output_name is not None:
+        output_name = _safe_output_name(output_name)
     policy_overrides = _parse_json_field(policy, "policy")
     try:
         segs = resolve_segments(segments, scan_id)
         if policy_overrides is None and scan_id is not None:
-            # consistency: blur with the same policy the scan was judged by
+            # consistency: mask with the same policy the scan was judged by
             policy_overrides = scan_store[scan_id].get("policy")
         from .policy import Policy
         Policy.from_overrides(policy_overrides)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
-    blur_id = new_blur_entry(Path(video_path).name)
+    mask_id = new_mask_entry(Path(video_path).name)
     window = ((window_start, window_end) if window_start is not None
               else None)
     background_tasks.add_task(
-        run_blur_job, blur_id, video_path, segs, policy_overrides,
-        window, cq)
+        run_mask_job, mask_id, video_path, segs, policy_overrides,
+        window, cq, output_name=output_name, bake_chapters=bake_chapters)
     return JSONResponse({
-        "blur_id": blur_id,
-        "status": blur_store[blur_id]["status"],
-        "status_url": f"/blur/{blur_id}",
-        "note": "output lands in the container's BLUR_OUTPUT_DIR",
+        "mask_id": mask_id,
+        "status": mask_store[mask_id]["status"],
+        "status_url": f"/mask/{mask_id}",
+        "note": "output lands in the container's MASK_OUTPUT_DIR"
+                + (f" as {output_name}" if output_name else "")
+                + ("; chapters baked automatically"
+                   if bake_chapters and window is None else ""),
     }, status_code=202)
 
 
-@app.get("/blur/{blur_id}")
-def get_blur(blur_id: str):
-    if blur_id not in blur_store:
-        raise HTTPException(404, "blur id not found")
-    return blur_store[blur_id]
+@app.get("/mask/{mask_id}")
+def get_mask(mask_id: str):
+    if mask_id not in mask_store:
+        raise HTTPException(404, "mask id not found")
+    return mask_store[mask_id]
 
 
-@app.get("/blurs")
-def list_blurs():
-    return list(blur_store.values())
+@app.get("/masks")
+def list_masks():
+    return list(mask_store.values())
+
+
+@app.post("/verify", status_code=202)
+async def submit_verify(
+    background_tasks: BackgroundTasks,
+    video_path: str | None = Form(None,
+                                  description="Source video (mounted path)"),
+    output_path: str | None = Form(None,
+                                   description="Masked render (mounted path)"),
+    mask_id: str | None = Form(None,
+                               description="Resolve source/output/segments "
+                                           "from this completed mask job"),
+    segments: str | None = Form(None, description="JSON segments"),
+    scan_id: str | None = Form(None, description="Take segments from a scan"),
+    masked_i: list[int] | None = Form(
+        None, description="Segment indices to spot-check (repeatable; "
+                          "default: auto — seg 0 + first of each "
+                          "provenance class)"),
+    clean_t: list[float] | None = Form(
+        None, description="Clean-spot seconds (repeatable; default: auto "
+                          "— evenly spread, clear of segments)"),
+    k: int = Form(6, description="Neighbor frames searched per spot"),
+):
+    segs_resolved = None
+    if mask_id is not None:
+        if mask_id not in mask_store:
+            raise HTTPException(404, "mask id not found")
+        entry = mask_store[mask_id]
+        if entry["status"] != "completed":
+            raise HTTPException(400, f"mask job is {entry['status']}")
+        output_path = output_path or entry.get("output")
+        video_path = video_path or entry.get("video_path")
+        segs_resolved = entry.get("segments")
+    if not video_path or not output_path:
+        raise HTTPException(400, "provide video_path + output_path, "
+                                 "or a completed mask_id")
+    for p, what in ((video_path, "video_path"), (output_path, "output_path")):
+        if not Path(p).exists():
+            raise HTTPException(400, f"{what} not found: {p}")
+    try:
+        if segments is not None or scan_id is not None:
+            segs = resolve_segments(segments, scan_id)
+        elif segs_resolved:
+            segs = [dict(s) for s in segs_resolved]
+        else:
+            raise ValueError("provide segments, scan_id, or mask_id")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    verify_id = new_verify_entry(video_path, output_path)
+    background_tasks.add_task(
+        run_verify_job, verify_id, video_path, output_path, segs,
+        masked_i, clean_t, k)
+    return JSONResponse({
+        "verify_id": verify_id,
+        "status": verify_store[verify_id]["status"],
+        "status_url": f"/verify/{verify_id}",
+    }, status_code=202)
+
+
+@app.get("/verify/{verify_id}")
+def get_verify(verify_id: str):
+    if verify_id not in verify_store:
+        raise HTTPException(404, "verify id not found")
+    return verify_store[verify_id]
+
+
+@app.get("/verifies")
+def list_verifies():
+    return list(verify_store.values())
+
+
+@app.post("/chapters", status_code=202)
+async def submit_chapters(
+    background_tasks: BackgroundTasks,
+    output_path: str | None = Form(None,
+                                   description="Render to chapter-ize "
+                                               "(mounted path)"),
+    mask_id: str | None = Form(None,
+                               description="Resolve output/segments from "
+                                           "this completed mask job"),
+    segments: str | None = Form(None, description="JSON segments"),
+    scan_id: str | None = Form(None, description="Take segments from a scan"),
+):
+    segs_resolved = None
+    if mask_id is not None:
+        if mask_id not in mask_store:
+            raise HTTPException(404, "mask id not found")
+        entry = mask_store[mask_id]
+        if entry["status"] != "completed":
+            raise HTTPException(400, f"mask job is {entry['status']}")
+        output_path = output_path or entry.get("output")
+        segs_resolved = entry.get("segments")
+    if not output_path:
+        raise HTTPException(400, "provide output_path or a completed "
+                                 "mask_id")
+    if not Path(output_path).exists():
+        raise HTTPException(400, f"output_path not found: {output_path}")
+    try:
+        if segments is not None or scan_id is not None:
+            segs = resolve_segments(segments, scan_id)
+        elif segs_resolved:
+            segs = [dict(s) for s in segs_resolved]
+        else:
+            raise ValueError("provide segments, scan_id, or mask_id")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    chapters_id = new_chapters_entry(output_path)
+    background_tasks.add_task(
+        run_chapters_job, chapters_id, output_path, segs)
+    return JSONResponse({
+        "chapters_id": chapters_id,
+        "status": chapters_store[chapters_id]["status"],
+        "status_url": f"/chapters/{chapters_id}",
+    }, status_code=202)
+
+
+@app.get("/chapters/{chapters_id}")
+def get_chapters(chapters_id: str):
+    if chapters_id not in chapters_store:
+        raise HTTPException(404, "chapters id not found")
+    return chapters_store[chapters_id]
 
 
 @app.get("/scans")

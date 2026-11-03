@@ -1,13 +1,13 @@
-"""Bridge-noise demotion (pipeline) + render fail-safe (blur).
+"""Bridge-noise demotion (pipeline) + render fail-safe (mask).
 
 Both behaviors validated on Gone Girl 2026-11-03: 8 flagged segments
 rendered as no-ops — 7 pure track-bridge (no passing label, sub-threshold
 held flicker) and 1 labeled segment whose 4fps scan detection did not
-reproduce at the 8fps blur re-detection.
+reproduce at the 8fps mask re-detection.
 """
 import numpy as np
 
-from scanner.blur import failsafe_entries
+from scanner.mask import failsafe_entries
 from scanner.pipeline import demote_bridge_only
 
 
@@ -42,7 +42,7 @@ def test_demotion_noop_when_all_labeled():
     assert kept is segs and rev == []
 
 
-# --- blur: full-frame fail-safe for labeled-but-undetectable -------------------
+# --- mask: full-frame fail-safe for labeled-but-undetectable -------------------
 
 def test_failsafe_full_frame_for_labeled_segment():
     seg = _seg(100.0, 105.0, {"MALE_GENITALIA_EXPOSED": 1}, score=0.52)

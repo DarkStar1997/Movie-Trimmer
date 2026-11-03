@@ -18,7 +18,7 @@ from scanner.temporal import SmoothingConfig
 # --- planning --------------------------------------------------------------------
 
 def test_plan_never_samples_inside_segments():
-    """Trusted-source policy: detector/crowd segments are blur-final; the
+    """Trusted-source policy: detector/crowd segments are mask-final; the
     VLM never looks inside them (verify frames removed with the policy)."""
     segs = [{"start": 100.0, "end": 110.0}, {"start": 300.0, "end": 310.0}]
     planned = plan_frames(600.0, segs)

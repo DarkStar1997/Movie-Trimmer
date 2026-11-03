@@ -80,7 +80,7 @@ class FFmpegPipeDecoder:
         # exact=True: no fps filter — frames pass through 1:1 (render path,
         # where frame counts must match source packet counts exactly)
         self.exact = exact
-        self.stall_timeout_s = (config.BLUR_STALL_TIMEOUT_S
+        self.stall_timeout_s = (config.MASK_STALL_TIMEOUT_S
                                 if stall_timeout_s is None else stall_timeout_s)
         self._stalled = False
         self._watchdog: threading.Thread | None = None

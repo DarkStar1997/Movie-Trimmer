@@ -10,12 +10,12 @@ cut semantics; this design removes the class of failure entirely):
                      person-mask (torch ops on the same CUDA surface)
                   -> CreateEncoder (NVENC, P5/hq, VBR + explicit CQ)
                   -> FFmpegMuxer (audio passthrough, bit-exact PTS; subtitle-bearing
-    sources are sub-stripped upstream — see blur.run_blur)
+    sources are sub-stripped upstream — see mask.run_mask)
 
-Frames never touch the CPU; the blur is ~2 pooled resamples + a where() on
+Frames never touch the CPU; the mask is ~2 pooled resamples + a where() on
 the GPU per frame, and the warning overlay is a handful of masked where()
 passes over precomputed BT.709 NV12 color constants. The demux/decode/encode/mux loop is
-the PyNvVideoCodec `advanced/transcode.py` reference with the blur inserted
+the PyNvVideoCodec `advanced/transcode.py` reference with the mask inserted
 between Decode() and Encode().
 """
 
@@ -42,12 +42,12 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
     """-> stats dict. Requires the container's GPU stack (torch + CUDA)."""
     import torch
     import PyNvVideoCodec as nvc
-    from .blur import probe_fps, probe_pix_fmt
+    from .mask import probe_fps, probe_pix_fmt
     import bisect
     import cv2
 
     t_start = time.monotonic()
-    cq = cq or config.BLUR_CQ
+    cq = cq or config.MASK_CQ
     src_fps = probe_fps(video_path)
     # Bit-depth adapter: 8-bit sources decode to NV12 surfaces, 10-bit
     # (HEVC main10 etc.) to P016 — same Y + interleaved-UV layout, but
@@ -164,11 +164,11 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
         overlay is disabled. Masks are derived from a sentinel-colored
         canvas (fill R-channel, outline B-channel) rendered once per
         keyframe entry — the label/score ride in the analysis entries."""
-        if not config.BLUR_OVERLAY:
+        if not config.MASK_OVERLAY:
             return None
         key = ("overlay", si, ki)
         if key not in mask_cache:
-            from .blur import draw_warning
+            from .mask import draw_warning
             entry = per_seg[si][ki]
             canvas = np.zeros((h, w, 3), dtype=np.uint8)
             draw_warning(canvas, entry[2], entry[3],
@@ -205,14 +205,14 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
         fill(cb, ruv[:, 0::2], RED_CB)
         fill(cr, ruv[:, 1::2], RED_CR)
 
-    frames = blurred = 0
+    frames = masked = 0
     held = {"si": -1, "ki": -1}
     last_progress = time.monotonic()
     try:
         while True:
-            if time.monotonic() - last_progress > config.BLUR_STALL_TIMEOUT_S:
+            if time.monotonic() - last_progress > config.MASK_STALL_TIMEOUT_S:
                 raise RuntimeError("GPU decode stalled %.0fs — aborting"
-                                   % config.BLUR_STALL_TIMEOUT_S)
+                                   % config.MASK_STALL_TIMEOUT_S)
             pkt = nv_dmx.DemuxNoSkipAudio()
             if pkt.is_video or pkt.bsl == 0:
                 muxer.RecordSourceVideoPacket(pkt)
@@ -220,7 +220,7 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
                     last_progress = time.monotonic()
                     t_sec = frames / src_fps
                     if ten_bit:
-                        # every frame takes this path, not just blurred
+                        # every frame takes this path, not just masked
                         # ones — Encode() rejects the raw dlpack frame (its
                         # export carries u16 geometry on a u1 typestr, and
                         # the binding validates typestr). Re-stride to the
@@ -251,7 +251,7 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
                         # the queue (observed: overlay flickering off on
                         # ~half the flagged frames)
                         torch.cuda.synchronize()
-                        blurred += 1
+                        masked += 1
                     pp = nvc.NV_ENC_PIC_PARAMS()
                     pp.inputTimeStamp = frames
                     frames += 1
@@ -274,10 +274,10 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
         torch.cuda.empty_cache()
 
     wall = time.monotonic() - t_start
-    logger.info("[blur:gpu] %d frames (%d blurred, %.1f%%) in %.1fs "
-                "(%.1fx realtime)", frames, blurred,
-                100 * blurred / max(frames, 1), wall,
+    logger.info("[mask:gpu] %d frames (%d masked, %.1f%%) in %.1fs "
+                "(%.1fx realtime)", frames, masked,
+                100 * masked / max(frames, 1), wall,
                 frames / src_fps / max(wall, 0.01))
-    return {"frames": frames, "frames_blurred": blurred,
+    return {"frames": frames, "frames_masked": masked,
             "codec": "hevc_nvenc", "transport": "gpu-native",
             "wall_time_s": round(wall, 2)}

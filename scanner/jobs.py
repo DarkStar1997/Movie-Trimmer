@@ -84,27 +84,38 @@ async def run_scan_job(scan_id: str, video_path: str,                       poli
             shutil.rmtree(workspace, ignore_errors=True)
 
 
-# --- blur jobs (stage C) ---------------------------------------------------------
+# --- mask jobs (stage C) ---------------------------------------------------------
 
-blur_store: Dict[str, Dict[str, Any]] = {}
-blur_semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_SCANS)
+mask_store: Dict[str, Dict[str, Any]] = {}
+mask_semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_SCANS)
 
 
-def new_blur_entry(video_name: str) -> str:
-    blur_id = str(uuid.uuid4())
-    blur_store[blur_id] = {
-        "blur_id": blur_id,
+def new_mask_entry(video_name: str) -> str:
+    mask_id = str(uuid.uuid4())
+    mask_store[mask_id] = {
+        "mask_id": mask_id,
         "status": "queued",
         "submitted_at": datetime.now().isoformat(),
         "video": video_name,
         "output": None,
         "error": None,
     }
-    return blur_id
+    return mask_id
+
+
+def safe_output_name(name: str) -> str:
+    """Sanitize a user-supplied output filename to a bare .mp4 basename;
+    raises ValueError on anything that escapes the output dir."""
+    n = Path(name).name.strip()
+    if not n or n.startswith(".") or n in {".", ".."}:
+        raise ValueError(f"invalid output_name: {name!r}")
+    if not n.endswith(".mp4"):
+        n += ".mp4"
+    return n
 
 
 def resolve_segments(segments_json: Any, scan_id: str | None) -> list[dict]:
-    """Segments for a blur job: explicit JSON list, or a completed scan's.
+    """Segments for a mask job: explicit JSON list, or a completed scan's.
     JSON items may be [start, end] pairs or full segment dicts (labels and
     mean_score are preserved for the VLM-segment masking path)."""
     if scan_id is not None:
@@ -138,29 +149,130 @@ def resolve_segments(segments_json: Any, scan_id: str | None) -> list[dict]:
     return out
 
 
-async def run_blur_job(blur_id: str, video_path: str, segments: list[dict],
+async def run_mask_job(mask_id: str, video_path: str, segments: list[dict],
                         policy_overrides: Optional[dict],
-                        window: Optional[tuple], cq: Optional[int]) -> None:
-    entry = blur_store[blur_id]
+                        window: Optional[tuple], cq: Optional[int],
+                        output_name: Optional[str] = None,
+                        bake_chapters: bool = True) -> None:
+    entry = mask_store[mask_id]
+    entry["video_path"] = video_path
+    entry["segments"] = segments
     try:
-        async with blur_semaphore:
+        async with mask_semaphore:
             entry["status"] = "processing"
-            from .blur import run_blur
+            from .mask import run_mask
             policy = Policy.from_overrides(policy_overrides)
-            out_dir = Path(config.BLUR_OUTPUT_DIR)
+            out_dir = Path(config.MASK_OUTPUT_DIR)
             out_dir.mkdir(parents=True, exist_ok=True)
-            out = out_dir / f"masked_{blur_id[:8]}.mp4"
+            out = out_dir / (output_name or f"masked_{mask_id[:8]}.mp4")
+            entry["output"] = str(out)
             fn = functools.partial(
-                run_blur, video_path, segments, str(out), policy=policy,
+                run_mask, video_path, segments, str(out), policy=policy,
                 window=window, cq=cq)
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, fn)
             entry.update(result)
+            if bake_chapters:
+                if window is None:
+                    # chapters are full-movie-timeline metadata; window
+                    # renders have an offset timeline and would get
+                    # garbage chapter times
+                    from .chapters import bake
+                    entry["chapters"] = await loop.run_in_executor(
+                        None, bake, str(out), segments)
+                else:
+                    entry["chapters"] = {"note": "window render — "
+                                     "chapters skipped (offset timeline)"}
             entry["status"] = "completed"
-            logger.info("[blur %s] completed: %d frames, %d blurred, codec=%s",
-                        blur_id, result["frames"], result["frames_blurred"],
-                        result["codec"])
+            logger.info("[mask %s] completed: %d frames, %d masked, "
+                        "codec=%s%s", mask_id, result["frames"],
+                        result["frames_masked"], result["codec"],
+                        (f", {entry['chapters']['mask_chapters']} "
+                         "chapters" if "mask_chapters" in entry.get(
+                             "chapters", {}) else ""))
     except Exception as e:  # noqa: BLE001
-        logger.exception("[blur %s] failed", blur_id)
+        logger.exception("[mask %s] failed", mask_id)
+        entry["status"] = "failed"
+        entry["error"] = str(e)
+
+
+# --- verify jobs (render gate) ---------------------------------------------------
+
+verify_store: Dict[str, Dict[str, Any]] = {}
+verify_semaphore = asyncio.Semaphore(1)   # CPU/ffmpeg heavy: serialize
+
+
+def new_verify_entry(source: str, output: str) -> str:
+    verify_id = str(uuid.uuid4())
+    verify_store[verify_id] = {
+        "verify_id": verify_id,
+        "status": "queued",
+        "submitted_at": datetime.now().isoformat(),
+        "source": source,
+        "output": output,
+        "all_pass": None,
+        "checks": [],
+        "error": None,
+    }
+    return verify_id
+
+
+async def run_verify_job(verify_id: str, source: str, output: str,
+                         segments: list[dict],
+                         masked_i: Optional[list[int]],
+                         clean_t: Optional[list[float]],
+                         k: int = 6) -> None:
+    entry = verify_store[verify_id]
+    try:
+        async with verify_semaphore:
+            entry["status"] = "processing"
+            from .verify import run_verification
+            fn = functools.partial(run_verification, source, output,
+                                   segments, masked_i, clean_t, k)
+            loop = asyncio.get_event_loop()
+            report = await loop.run_in_executor(None, fn)
+            entry.update(report)
+            entry["status"] = "completed"
+            n_pass = sum(1 for c in report["checks"] if c["pass"])
+            logger.info("[verify %s] %s: %d/%d checks passed", verify_id,
+                        "ALL PASS" if report["all_pass"] else "FAILURES",
+                        n_pass, len(report["checks"]))
+    except Exception as e:  # noqa: BLE001
+        logger.exception("[verify %s] failed", verify_id)
+        entry["status"] = "failed"
+        entry["error"] = str(e)
+
+
+# --- chapter jobs ----------------------------------------------------------------
+
+chapters_store: Dict[str, Dict[str, Any]] = {}
+chapters_semaphore = asyncio.Semaphore(1)
+
+
+def new_chapters_entry(output: str) -> str:
+    chapters_id = str(uuid.uuid4())
+    chapters_store[chapters_id] = {
+        "chapters_id": chapters_id,
+        "status": "queued",
+        "submitted_at": datetime.now().isoformat(),
+        "output": output,
+        "error": None,
+    }
+    return chapters_id
+
+
+async def run_chapters_job(chapters_id: str, output: str,
+                           segments: list[dict]) -> None:
+    entry = chapters_store[chapters_id]
+    try:
+        async with chapters_semaphore:
+            entry["status"] = "processing"
+            from .chapters import bake
+            loop = asyncio.get_event_loop()
+            entry.update(await loop.run_in_executor(
+                None, bake, output, segments))
+            entry["status"] = "completed"
+    except Exception as e:  # noqa: BLE001
+        logger.exception("[chapters %s] failed", chapters_id)
         entry["status"] = "failed"
         entry["error"] = str(e)

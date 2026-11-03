@@ -215,7 +215,7 @@ trt_cache/
 scan_workspaces/
 scans/*
 !scans/gt_*.json
-blur_outputs/
+mask_outputs/
 
 # Movie files — never commit video content (test clips, sources, outputs)
 *.mp4

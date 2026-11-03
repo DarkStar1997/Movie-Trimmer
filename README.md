@@ -1,13 +1,13 @@
 # Movie-Trimmer
 
-GPU-native NSFW auto-detection and blur for movies: a FastAPI service that
+GPU-native NSFW auto-detection and masking for movies: a FastAPI service that
 scans a film for explicit content, then renders a copy in which every flagged
-moment is blurred with **person-shaped masks** — no cuts, no timeline drift,
+moment is masked with **person-shaped masks** — no cuts, no timeline drift,
 audio and subtitles bit-exact. It began as a movie trimmer / subtitle merger
 (`main.py`, still here) and grew the scanner (`scanner/`) into the main event.
 
 The whole pipeline — detector, person gate, VLM arbiter, community
-timestamps, GPU blur render — runs in **one container** on one GPU.
+timestamps, GPU mask render — runs in **one container** on one GPU.
 
 ![pipeline](docs/pipeline.svg)
 
@@ -31,7 +31,7 @@ python3 run.py --wait 120          # healthy → http://localhost:8081/health
 
 `run.py` runs a `--rm` container under the definite name `movie-trimmer`,
 mirroring `docker-compose.yml` (engine cache, repo read-only at `/movies`,
-blur outputs). It also removes any foreign container squatting port 8081
+mask outputs). It also removes any foreign container squatting port 8081
 (e.g. an old compose stack). `docker stop movie-trimmer` tears it down.
 
 ## Scanning
@@ -76,45 +76,68 @@ per-frame arbiter verdicts, crowd bookkeeping, and timings.
   nudity/sex categories, cached on disk, fail-soft (site down → scan
   proceeds). Entries are padded and treated as trusted territory.
 
-## Blurring
+## Masking
 
 ```bash
-# from a completed scan (same container run)
-curl -X POST http://localhost:8081/blur \
-  -F video_path=/movies/film.mkv -F scan_id={scan_id}
+# from a completed scan (same container run); output_name names the
+# final file, and mask-region chapters are baked automatically
+curl -X POST http://localhost:8081/mask \
+  -F video_path=/movies/film.mkv -F scan_id={scan_id} \
+  -F output_name=Film.2023.masked.mp4
 
 # from explicit segments — send FULL segment dicts, not bare pairs:
 # labels are load-bearing ('arbiter'/'cringemdb' segments get the
-# mask-every-person path; bare pairs lose them and render unblurred)
-curl -X POST http://localhost:8081/blur \
+# mask-every-person path; bare pairs lose them and render unmasked)
+curl -X POST http://localhost:8081/mask \
   -F video_path=/movies/film.mkv \
   -F 'segments=[{"start": 42.0, "end": 58.0, "labels": {"arbiter": 1}}]'
 
-# fast preview of one window
-curl -X POST http://localhost:8081/blur -F video_path=/movies/film.mkv \
-  -F 'segments=[[844.8, 859.5]]' -F window_start=840 -F window_end=865
+# fast preview of one window (chapters skipped: offset timeline)
+curl -X POST http://localhost:8081/mask -F video_path=/movies/film.mkv \
+  -F 'segments=[[844.8, 859.5]]' -F window_start=840 -F window_end=865 \
+  -F bake_chapters=false
 
-curl http://localhost:8081/blur/{blur_id}    # → output path in blur_outputs/
+curl http://localhost:8081/mask/{mask_id}    # → output path in mask_outputs/
 ```
 
 Full renders are one continuous GPU-native pass: NVDEC → zero-copy torch →
 RF-DETR person-mask pixelation on the GPU → NVENC (hevc). Frames never touch
 the CPU; audio and subtitles pass through bit-exact — frame and packet counts
-match the source exactly. Every flagged frame also carries a red overlay
-(`VULGARITY DETECTED / <conf>% <label>`); `BLUR_OVERLAY=0` disables it.
+match the source exactly. Masks are segmented per frame at the source's
+native fps (`MASK_KEYFRAME_FPS=0`; a fixed economy rate can be set). Every
+flagged frame also carries a red overlay
+(`VULGARITY DETECTED / <conf>% <label>`); `MASK_OVERLAY=0` disables it.
+
+## Chapters
+
+Every full render ends with mask-region chapters baked in (stream copy,
+no re-encode): each segment becomes a named chapter — `▶ MASK · VLM 94%` —
+and gap fillers bracket every mask with seek-bar ticks in mpv. Names flash
+on seek and drive chapter navigation (`PgUp`/`PgDn`). A completed render
+can be (re-)chaptered standalone:
+
+```bash
+curl -X POST http://localhost:8081/chapters \
+  -F output_path=/mask_outputs/OUT.mp4 \
+  -F 'segments=[{"start": 42.0, "end": 58.0, "labels": {"arbiter": 1}}]'
+```
 
 ## Verification
 
-`scripts/verify_blur.py` (host-side, CPU) re-checks a render against its
-source without trusting the pipeline: container/duration sanity, full decode
-with `-err_detect explode`, exact video packet count, audio payload md5
-(bit-exact), blur **presence** inside flagged segments (hot-pixel diff +
-texture crushing against the nearest source frames, matched by raw PTS), and
-blur **absence** in clean gaps.
+`POST /verify` (in-container, CPU) re-checks a render against its source
+without trusting the pipeline: container/duration sanity, full decode with
+`-err_detect explode`, exact video packet count, audio payload md5
+(bit-exact), mask **presence** inside flagged segments (hot-pixel diff +
+blackout + texture crushing against the nearest source frames, matched by
+raw PTS), and mask **absence** in clean gaps. Spots are auto-derived from
+segment provenance (detector / crowd / arbiter + evenly-spread clean
+times) unless given explicitly:
 
 ```bash
-python scripts/verify_blur.py SOURCE.mkv blur_outputs/OUT.mp4 SCAN.json \
-  --blurred-i 0 --blurred-i 3 ... --clean-t 3512.8 ...
+curl -X POST http://localhost:8081/verify \
+  -F video_path=/movies/film.mkv -F output_path=/mask_outputs/OUT.mp4 \
+  -F 'segments=[...]'            # or -F mask_id={id} alone
+curl http://localhost:8081/verify/{verify_id}   # → checks[], all_pass
 ```
 
 ## Validated end-to-end
@@ -126,9 +149,9 @@ Two full movies, no manual intervention between phases, judged by the gate:
 | runtime / frames | 8942 s · 214,355 | 7906 s · 189,741 |
 | segments found | 38 | 76 |
 | flagged time | 701 s (7.8 %) | 1747 s (22.1 %) |
-| frames blurred | 15,612 | 39,827 |
+| frames masked | 15,612 | 39,827 |
 | VLM new / edge-ext / merged | 16 / 5 / 2 | 11 / 31 / 7 |
-| scan → blur → verify | 882 / 507 / ~300 s | 1351 / 540 / 157 s |
+| scan → mask → verify | 882 / 507 / ~300 s | 1351 / 540 / 157 s |
 | throughput | decode ~935 fps · render 423 fps · arbiter 81–85 % of scan wall | |
 | verify gate | 24/24 PASS | 37/37 PASS |
 
@@ -141,9 +164,12 @@ covered: hevc 10-bit 16:9 and h264 8-bit 4:3.
 |---|---|
 | `POST /scan` | async scan (form: `video_path`, `arbiter`, `crowd`, `arbiter_mode=apply\|verify`, `sample_fps`, `policy`, `smoothing`, `track`, …) |
 | `GET /scan/{id}` | status + result JSON |
-| `POST /blur` | async render (form: `video_path`, `scan_id` or `segments`, `cq`, `window_start/end`) — solid-black person masks |
-| `GET /blur/{id}` | status → `output` path |
-| `GET /scans`, `GET /blurs` | lists |
+| `POST /mask` | async render (form: `video_path`, `scan_id` or `segments`, `cq`, `window_start/end`, `output_name`, `bake_chapters`) — solid-black person masks + chapters |
+| `GET /mask/{id}` | status → `output` path, render stats, chapters |
+| `POST /verify` | async render gate (form: `video_path`+`output_path`, or `mask_id`; optional `masked_i[]`, `clean_t[]`) |
+| `GET /verify/{id}` | status → `checks[]`, `all_pass` |
+| `POST /chapters` | bake mask chapters into a render in place (`output_path` or `mask_id`, + `segments`/`scan_id`) |
+| `GET /scans`, `GET /masks`, `GET /verifies` | lists |
 | `GET /health` | GPU/TRT state, models, on-demand VLM server state |
 
 ## Configuration
@@ -160,17 +186,19 @@ Key env knobs (all have sane defaults; see `scanner/config.py`):
 | `CROWD_CATEGORIES` | nudity,sex | in-scope crowd categories |
 | `CROWD_PAD_S` | 1.5 | padding around crowd ranges |
 | `VLM_START_TIMEOUT_S` | 900 | llama-server bring-up budget |
-| `BLUR_OVERLAY` | 1 | red warning overlay on flagged frames |
+| `MASK_KEYFRAME_FPS` | 0 | mask analysis rate; 0 = every frame at native fps (capped 30) |
+| `MASK_OVERLAY` | 1 | red warning overlay on flagged frames |
 | `DEFAULT_ARBITER_MODE` | apply | `verify` reports verdicts, changes nothing |
 
 ## Repo layout
 
 ```
 scanner/          the NSFW pipeline (decode, detector, person gate, arbiter,
-                  crowd, blur, API) — packaged into the images
-scripts/          verify_blur.py, segments_table.py, person_probe.py, eval_gt.py
+                  crowd, mask, API) — packaged into the images
+scripts/          segments_table.py, person_probe.py, eval_gt.py, eval/
+                  (prompt-replay harness — dev-time, host-side)
 docker/           entrypoints for the scanner / all-in-one images
-tests/            116 CPU-only tests: pytest tests/ -q
+tests/            137 CPU-only tests: pytest tests/ -q
 run.py            run the appliance (docker run --rm, port hygiene)
 build.py          build + push all images
 docker-compose.yml  alternative launch (same container, restart: unless-stopped)
@@ -200,8 +228,8 @@ python3 build.py --push     # build + push to GHCR
 
 TRT engines are cached in `trt_cache/`, keyed by a fingerprint of the ONNX
 content and build recipe (fp16/fp32) — first use builds (~1–3 min per model),
-after which scans start cold in seconds. Scan/blur artifacts land in
-`scans/` and `blur_outputs/` (gitignored).
+after which scans start cold in seconds. Scan/mask artifacts land in
+`scans/` and `mask_outputs/` (gitignored).
 
 ## The original trimmer
 

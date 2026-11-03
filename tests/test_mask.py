@@ -1,4 +1,4 @@
-"""Stage C tests: personseg decode math, blur helpers, end-to-end render.
+"""Stage C tests: personseg decode math, mask helpers, end-to-end render.
 
 The pure-function tests need no weights. The end-to-end test mocks the
 mask source (synthetic clips have no nudity) but runs the real decode ->
@@ -13,7 +13,7 @@ import tempfile
 import numpy as np
 import pytest
 
-from scanner.blur import (blackout_rgb, box_mask, dilate_mask,
+from scanner.mask import (blackout_rgb, box_mask, dilate_mask,
                           explicit_boxes, intersect_with_box, pad_box,
                           _writer_args)
 from scanner.detector import Detection
@@ -56,7 +56,7 @@ def test_decode_selects_matching_person():
     assert mask.shape == (40, 60)
     assert area > 0.9                                 # mask fully positive
     # the person box (6,10,24,30) overlaps match_box enough to count as
-    # matched -> callers may use this mask as the full-person blur
+    # matched -> callers may use this mask as the full-person mask
     assert pbbox is not None
     assert pbbox.tolist() == pytest.approx([6.0, 10.0, 24.0, 30.0],
                                            abs=1e-3)
@@ -80,7 +80,7 @@ def test_decode_containment_match():
 def test_decode_unmatched_returns_no_bbox():
     """When nothing matches the box the caller must be told: the returned
     mask is just the top-scoring person and must NOT be used as a
-    full-person blur for the box's subject (wrong-person risk)."""
+    full-person mask for the box's subject (wrong-person risk)."""
     labels, dets, masks = _fake_outs()
     labels[0, 3, PERSON_CLASS] = 3.0
     dets[0, 3] = [0.5, 0.5, 0.2, 0.2]               # person: 24..36 x 16..24
@@ -103,7 +103,7 @@ def test_decode_no_person_returns_none():
     assert mask is None and score == 0.0 and pbbox is None
 
 
-# --- blur helpers -------------------------------------------------------------------
+# --- mask helpers -------------------------------------------------------------------
 
 def test_pad_box_clips():
     out = pad_box(np.asarray([0., 0., 100., 50.]), 0.5, 200, 100)
@@ -181,11 +181,11 @@ def _person_mask(h=40, w=60):
     return m
 
 
-def test_keyframe_blurs_full_person_not_part_intersection():
+def test_keyframe_masks_full_person_not_part_intersection():
     seg = _FakeSeg([(_person_mask(), np.asarray([6.0, 4.0, 48.0, 36.0]))])
     frame = np.zeros((40, 60, 3), dtype=np.uint8)
     dets = [Detection("FEMALE_BREAST_EXPOSED", 0.60, (20, 15, 10, 10))]
-    from scanner.blur import keyframe_masks_for
+    from scanner.mask import keyframe_masks_for
     (mask, label, score), = keyframe_masks_for(
         [dets], [frame], Policy(), seg, dilate_px=1)
     # FULL person mask: far larger than the part box (20,15,30,25)
@@ -199,7 +199,7 @@ def test_keyframe_box_fallback_when_unmatched():
     seg = _FakeSeg([(_person_mask(), None)])
     frame = np.zeros((40, 60, 3), dtype=np.uint8)
     dets = [Detection("FEMALE_BREAST_EXPOSED", 0.60, (2, 2, 6, 6))]
-    from scanner.blur import keyframe_masks_for
+    from scanner.mask import keyframe_masks_for
     (mask, _, _), = keyframe_masks_for(
         [dets], [frame], Policy(), seg, dilate_px=1)
     assert mask.sum() == 10 * 10
@@ -218,7 +218,7 @@ def test_keyframe_tracking_bridges_detector_flicker():
     ])
     frame = np.zeros((40, 60, 3), dtype=np.uint8)
     dets = [Detection("FEMALE_BREAST_EXPOSED", 0.60, (20, 15, 10, 10))]
-    from scanner.blur import keyframe_masks_for
+    from scanner.mask import keyframe_masks_for
     m1, m2, m3 = keyframe_masks_for(
         [dets, [], []], [frame] * 3, Policy(), seg, dilate_px=1)
     assert m1[0].sum() == _person_mask().sum()
@@ -230,7 +230,7 @@ def test_keyframe_tracking_bridges_detector_flicker():
 def test_keyframe_vlm_source_masks_all_persons():
     seg = _FakeSeg([(_person_mask(), None)])
     frame = np.zeros((40, 60, 3), dtype=np.uint8)
-    from scanner.blur import keyframe_masks_for
+    from scanner.mask import keyframe_masks_for
     (mask, label, score), = keyframe_masks_for(
         [[]], [frame], Policy(), seg, dilate_px=1,
         vlm_source=True, vlm_score=0.98)
@@ -241,12 +241,12 @@ def test_keyframe_vlm_source_masks_all_persons():
 def test_keyframe_vlm_center_fallback():
     seg = _FakeSeg([(None, None)])               # segmenter finds nobody
     frame = np.zeros((40, 60, 3), dtype=np.uint8)
-    from scanner.blur import keyframe_masks_for
+    from scanner.mask import keyframe_masks_for
     from scanner import config
     (mask, label, score), = keyframe_masks_for(
         [[]], [frame], Policy(), seg, dilate_px=1,
         vlm_source=True, vlm_score=0.95)
-    frac = config.BLUR_VLM_CENTER_FRAC
+    frac = config.MASK_VLM_CENTER_FRAC
     expect = int(round(60 * frac)) * int(round(40 * frac))
     assert abs(mask.sum() - expect) < 8          # centered rect ~ frac^2 area
     assert mask[20, 30] and not mask[0, 0]       # center yes, corner no
@@ -255,7 +255,7 @@ def test_keyframe_vlm_center_fallback():
 # --- warning overlay -----------------------------------------------------------------
 
 def test_draw_warning_red_text_top_left():
-    from scanner.blur import draw_warning
+    from scanner.mask import draw_warning
     canvas = np.zeros((270, 640, 3), dtype=np.uint8)
     draw_warning(canvas, "FEMALE_BREAST_EXPOSED", 0.87)
     red = (canvas[..., 0] > 180) & (canvas[..., 1] < 90) \
@@ -270,9 +270,9 @@ def test_draw_warning_red_text_top_left():
 
 # --- end-to-end (real ffmpeg chain, mocked masks) -----------------------------------
 
-def test_run_blur_end_to_end(monkeypatch):
-    import scanner.blur as blur
-    from scanner.blur import run_blur
+def test_run_mask_end_to_end(monkeypatch):
+    import scanner.mask as mask
+    from scanner.mask import run_mask
     from scanner.policy import Policy as P
 
     with tempfile.TemporaryDirectory() as td:
@@ -287,18 +287,18 @@ def test_run_blur_end_to_end(monkeypatch):
         # fake the two model stages: no detections, center-block mask +
         # label/score for the overlay
         monkeypatch.setattr(
-            blur, "keyframe_masks_for",
+            mask, "keyframe_masks_for",
             lambda results, frames, policy, seg, dilate_px, **kw: [
                 (_center_mask(f.shape[0], f.shape[1]),
                  "FEMALE_BREAST_EXPOSED", 0.83) for f in frames])
 
-        res = run_blur(clip, [{"start": 2.0, "end": 4.0}], out,
+        res = run_mask(clip, [{"start": 2.0, "end": 4.0}], out,
                        policy=P(), backend="ort",
                        window=(0.5, 5.5))
 
         # window previews take the pipe path; this host has NVENC (hevc)
         assert res["codec"] in ("hevc_nvenc", "h264_nvenc", "libx264")
-        assert res["frames_blurred"] > 0
+        assert res["frames_masked"] > 0
         assert res["keyframes"] > 0
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries",

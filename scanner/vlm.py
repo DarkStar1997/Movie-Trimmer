@@ -11,7 +11,7 @@ a deterministic lifecycle instead:
     release()  — un-pin; the LAST releaser terminates the server and
                  frees the VRAM. Called in run_arbiter's finally.
 
-Refcounted: MAX_CONCURRENT_SCANS blur jobs never acquire, concurrent
+Refcounted: MAX_CONCURRENT_SCANS mask jobs never acquire, concurrent
 arbiter runs share one server and only the final release stops it.
 Bring-up failure raises VlmUnavailable — the caller (run_arbiter)
 records it as an error block; a scan NEVER silently degrades, the

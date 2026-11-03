@@ -1,4 +1,4 @@
-"""RF-DETR Seg Medium person segmenter (stage C: mask-precision blurring).
+"""RF-DETR Seg Medium person segmenter (stage C: mask-precision censoring).
 
 Ported from fitness-coach `visioncoach.models.PersonSegmenter`, keeping the
 numerics identical:
@@ -82,7 +82,7 @@ def decode(outs: dict, in_names_map: dict, h0: int, w0: int,
     above MATCH_IOU, or the explicit-part box is >=60% inside the person
     box — containment matters for part boxes, whose IoU against a person
     box is inherently low). Unmatched callers must NOT use the returned
-    mask as a full-person blur: it is whatever person scored highest.
+    mask as a full-person mask: it is whatever person scored highest.
     """
     logits = np.asarray(outs[in_names_map["labels"]], dtype=np.float32)
     boxes_cxcy = np.asarray(outs[in_names_map["dets"]], dtype=np.float32)

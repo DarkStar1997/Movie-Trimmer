@@ -3,13 +3,13 @@
 Two passes over the movie:
 
   analysis (cheap, flagged ranges only)
-    For each remove-segment, decode [start, end] at BLUR_KEYFRAME_FPS
+    For each remove-segment, decode [start, end] at MASK_KEYFRAME_FPS
     (default: every frame at native fps) and
     analysis size (the scan's decode size — detection parity). Run NudeNet
     per batch; per keyframe the censor mask is:
 
       detector segments — union over trigger-passing boxes of the MATCHED
-      person's full-body mask (the whole person is blurred, not just the
+      person's full-body mask (the whole person is masked, not just the
       part box); padded box-rect fallback when no person matches (close-up
       crops where the person detector fails are exactly when the box
       matters). When NudeNet flickers off, the last matched person box is
@@ -20,7 +20,7 @@ Two passes over the movie:
 
     Every masked keyframe carries (label, score) for the warning overlay;
     at render time each flagged frame gets red top-left text
-    "VULGARITY DETECTED / <conf>% <label>" (BLUR_OVERLAY kill-switch) — a
+    "VULGARITY DETECTED / <conf>% <label>" (MASK_OVERLAY kill-switch) — a
     black silhouette needs no help being invisible, but the flag tells the
     viewer what happened and why a person-shaped void walks through the
     scene.
@@ -103,7 +103,7 @@ def strip_subtitles(path: str, workdir: str) -> str:
     """Sub-free stream-copy of the source (video+audio bit-exact) for the
     GPU render: PyNvVideoCodec's muxer cannot carry subtitle streams over —
     the MP4 muxer EINVALs at header write and the MKV muxer segfaults (a
-    45-track SRT WEBRip found both). Subtitles are dropped from blur
+    45-track SRT WEBRip found both). Subtitles are dropped from mask
     outputs."""
     fd, tmp = tempfile.mkstemp(suffix=".mkv", dir=workdir)
     os.close(fd)
@@ -227,10 +227,10 @@ def keyframe_masks_for(dets_per_frame, frames, policy, segmenter,
 
     Detector-sourced segments: for each explicit-part box the matched
     person's FULL mask is used (not the part-box intersection — the brief
-    is to blur the whole person). When no person matches the box, the
+    is to mask the whole person). When no person matches the box, the
     padded box rectangle is the fallback (close-up crops where the person
     detector fails are exactly when the box matters; an unmatched person
-    mask would risk blurring the wrong person). NudeNet flicker is bridged
+    mask would risk masking the wrong person). NudeNet flicker is bridged
     by re-matching the last matched person box (track_state) so the person
     stays masked for as long as they remain in frame.
 
@@ -250,7 +250,7 @@ def keyframe_masks_for(dets_per_frame, frames, policy, segmenter,
             # mask all persons; the source saw nudity, so err wide
             pmask = segmenter.all_persons(frame)
             if pmask is None or not pmask.any():
-                frac = config.BLUR_VLM_CENTER_FRAC
+                frac = config.MASK_VLM_CENTER_FRAC
                 pmask = box_mask(
                     np.asarray([(1 - frac) * w / 2, (1 - frac) * h / 2,
                                 (1 + frac) * w / 2, (1 + frac) * h / 2]),
@@ -274,7 +274,7 @@ def keyframe_masks_for(dets_per_frame, frames, policy, segmenter,
                     state["bbox"] = pbbox        # track for flicker frames
                     state["label"], state["score"] = label, score
                 else:
-                    padded = pad_box(bx, config.BLUR_BOX_PAD_FRAC, w, h)
+                    padded = pad_box(bx, config.MASK_BOX_PAD_FRAC, w, h)
                     union |= box_mask(padded, w, h)
         elif state.get("bbox") is not None:
             # NudeNet flickered off but the person may still be in frame:
@@ -326,9 +326,9 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
     "CRINGEMDB:<category>" + crowd score for community-timestamp
     segments (labels starting with 'cringemdb'). Both non-detector
     sources mask every person, with a center fallback."""
-    kf_fps = config.BLUR_KEYFRAME_FPS or min(probe_fps(video_path), 30.0)
+    kf_fps = config.MASK_KEYFRAME_FPS or min(probe_fps(video_path), 30.0)
     # dilation covers keyframe-hold motion; scaled to the analysis resolution
-    dilate_px = max(3, int(round(config.BLUR_MASK_DILATE_FRAC * aw)))
+    dilate_px = max(3, int(round(config.MASK_DILATE_FRAC * aw)))
     per_seg: dict[int, list] = {}
     for si, seg in enumerate(segments):
         start, end = float(seg["start"]), float(seg["end"])
@@ -381,21 +381,21 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
             try:
                 analyze(True)
             except DecoderStalled:
-                logger.warning("[blur] NVDEC stall in segment %d — "
+                logger.warning("[mask] NVDEC stall in segment %d — "
                                "retrying on CPU decode", si)
                 analyze(False)
         except Exception as e:  # noqa: BLE001
-            logger.warning("[blur] analysis of segment %d failed: %s", si, e)
+            logger.warning("[mask] analysis of segment %d failed: %s", si, e)
         if not entries:
             fb = failsafe_entries(seg, aw, ah)
             if fb:
                 entries = fb
-                logger.warning("[blur] segment %d [%d-%d]: no detections "
+                logger.warning("[mask] segment %d [%d-%d]: no detections "
                                "at re-analysis — full-frame fail-safe "
                                "(label %s)", si, int(start), int(end),
                                fb[0][2])
         per_seg[si] = entries
-        logger.info("[blur] segment %d [%d-%d]%s: %d mask keyframes",
+        logger.info("[mask] segment %d [%d-%d]%s: %d mask keyframes",
                     si, int(start), int(end),
                     " (vlm)" if vlm else "", len(entries))
     return per_seg
@@ -437,10 +437,10 @@ def _start_writer(video_path: str, out_path: str, w: int, h: int,
         time.sleep(1.5)
         if proc.poll() not in (None, 0):
             last_err = proc.stderr.read().decode(errors="replace")[-400:]
-            logger.warning("[blur] writer codec %s failed: %s", codec,
+            logger.warning("[mask] writer codec %s failed: %s", codec,
                            last_err)
             continue
-        logger.info("[blur] writer: %s", codec)
+        logger.info("[mask] writer: %s", codec)
         return proc, codec
     raise RuntimeError(f"no usable encoder (tried {codecs}): {last_err}")
 
@@ -460,7 +460,7 @@ def _render_range(video_path: str, t0: float, t1: float, w: int, h: int,
                                    start=t0, duration=t1 - t0 + 2.0 / src_fps,
                                    exact=True, use_hwaccel=hw)
         writer = None
-        frames_out = frames_blurred = 0
+        frames_out = frames_masked = 0
         try:
             with reader:
                 writer, codec = _start_writer(
@@ -485,9 +485,9 @@ def _render_range(video_path: str, t0: float, t1: float, w: int, h: int,
                                 "label": entries[ki][2],
                                 "score": entries[ki][3]}
                         frame = blackout_rgb(frame, held["mask"])
-                        if config.BLUR_OVERLAY:
+                        if config.MASK_OVERLAY:
                             draw_warning(frame, held["label"], held["score"])
-                        frames_blurred += 1
+                        frames_masked += 1
                     writer.stdin.write(frame.tobytes())
                     frames_out += 1
                 writer.stdin.close()
@@ -495,13 +495,13 @@ def _render_range(video_path: str, t0: float, t1: float, w: int, h: int,
                 if rc != 0:
                     err = writer.stderr.read().decode(errors="replace")[-400:]
                     raise RuntimeError(f"writer exited {rc}: {err}")
-            return frames_out, frames_blurred, codec
+            return frames_out, frames_masked, codec
         except DecoderStalled:
             if writer is not None and writer.poll() is None:
                 writer.terminate()
             if not hw:
                 raise
-            logger.warning("[blur] NVDEC stall in [%.3f,%.3f) — "
+            logger.warning("[mask] NVDEC stall in [%.3f,%.3f) — "
                            "retrying range on CPU decode", t0, t1)
     raise RuntimeError("unreachable")
 
@@ -512,21 +512,21 @@ def render_pass(video_path: str, out_path: str, segments: list[dict],
                 cq: int = None) -> dict:
     """Pipe-path render for window previews (small ranges; full renders use
     the GPU-native scanner/gpu_render.py)."""
-    cq = cq or config.BLUR_CQ
+    cq = cq or config.MASK_CQ
     seg_bounds = [(float(s["start"]), float(s["end"])) for s in segments]
     starts = [a for a, _ in seg_bounds]
     kf_index = {si: [e[0] for e in entries]
                 for si, entries in per_seg.items()}
 
-    frames_out, frames_blurred, codec = _render_range(
+    frames_out, frames_masked, codec = _render_range(
         video_path, window[0], window[1], w, h, aw, ah, per_seg, seg_bounds,
-        starts, kf_index, cq, config.BLUR_CODECS,
+        starts, kf_index, cq, config.MASK_CODECS,
         out_path=out_path)
-    return {"frames": frames_out, "frames_blurred": frames_blurred,
+    return {"frames": frames_out, "frames_masked": frames_masked,
             "codec": codec}
 
 
-def run_blur(video_path: str, segments: list[dict], out_path: str, *,
+def run_mask(video_path: str, segments: list[dict], out_path: str, *,
              policy: Policy, backend: str = "trt",
              window: tuple[float, float] | None = None,
              cq: int = None) -> dict:
@@ -544,7 +544,7 @@ def run_blur(video_path: str, segments: list[dict], out_path: str, *,
         for s in segments:
             s["start"], s["end"] = max(s["start"], a), min(s["end"], b)
     if not segments:
-        raise ValueError("no segments to blur")
+        raise ValueError("no segments to mask")
 
     w, h = probe_dimensions(video_path)
     from .decode import analysis_size
@@ -555,7 +555,7 @@ def run_blur(video_path: str, segments: list[dict], out_path: str, *,
     per_seg = analysis_pass(video_path, segments, policy, detector,
                             segmenter, aw, ah)
     if not any(per_seg.values()):
-        raise RuntimeError("analysis produced no masks — nothing to blur")
+        raise RuntimeError("analysis produced no masks — nothing to mask")
 
     # analysis is done: free its TRT engines so the render has the whole
     # GPU (render re-imports nothing from analysis)
@@ -590,7 +590,7 @@ def run_blur(video_path: str, segments: list[dict], out_path: str, *,
         check=True).stdout.strip()
     return {
         "output": out_path,
-        "segments_blurred": len(segments),
+        "segments_masked": len(segments),
         "keyframes": sum(len(v) for v in per_seg.values()),
         "duration_out": float(dur),
         "wall_time_s": round(time.monotonic() - t0, 2),
