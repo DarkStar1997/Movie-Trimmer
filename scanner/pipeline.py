@@ -56,6 +56,29 @@ class DetectorRegistry:
 registry = DetectorRegistry()
 
 
+def demote_bridge_only(segments: list[dict],
+                       review_segments: list[dict]) -> tuple[list[dict],
+                                                             list[dict]]:
+    """Pure track-bridge segments (no sample carried a passing trigger
+    label — only tracker-held sub-threshold flicker) are scan noise:
+    NudeNet re-detection at blur time finds nothing in them (Gone Girl
+    2026-11-03: 7 such segments, every one a 0-keyframe no-op render).
+    Demote them to review so remove-class renders never see them; the
+    TRACK_BRIDGE label records provenance for review UIs. Labeled bridge
+    tails (real detections + held flicker) are unaffected."""
+    noise = [s for s in segments if not s.get("labels")]
+    if not noise:
+        return segments, review_segments
+    for s in noise:
+        s["labels"] = {"TRACK_BRIDGE": s.get("bridged_samples", 0)}
+    ids = {id(s) for s in noise}
+    kept = [s for s in segments if id(s) not in ids]
+    merged = sorted(review_segments + noise, key=lambda s: s["start"])
+    logger.info("[scan] %d pure-bridge segment(s) demoted to review "
+                "(track-held flicker, no passing label)", len(noise))
+    return kept, merged
+
+
 def run_scan(
     video_path: str,
     *,
@@ -205,6 +228,8 @@ def run_scan(
         seg["bridged_samples"] = sum(
             1 for t, bo in zip(ts, bridge_only)
             if bo and seg["start"] <= t <= seg["end"])
+    segments, review_segments = demote_bridge_only(segments,
+                                                   review_segments)
     timeline = bin_timeline(trig_flags, ts, duration)
 
     # person gate: join the side stream and smooth presence into ranges

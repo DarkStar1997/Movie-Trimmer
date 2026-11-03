@@ -293,6 +293,27 @@ def keyframe_masks_for(dets_per_frame, frames, policy, segmenter,
 
 # --- analysis pass ----------------------------------------------------------------
 
+def failsafe_entries(seg: dict, aw: int, ah: int) -> list[tuple]:
+    """Full-frame mask keyframes for a labeled segment whose analysis pass
+    found nothing — the scan-time detection (4fps) failed to reproduce at
+    re-detection (8fps; Gone Girl 2026-11-03: a borderline 0.52
+    MALE_GENITALIA_EXPOSED segment). Censoring was promised for the range;
+    when the pipeline cannot find WHERE, it blacks the whole frame rather
+    than silently rendering an unmasked no-op. Unlabeled (pure
+    track-bridge) segments return [] — scan-side demotion routes those to
+    review before a render ever sees them."""
+    labs = seg.get("labels") or {}
+    if not labs:
+        return []
+    top = max(labs, key=labs.get)
+    full = np.packbits(np.ones((ah, aw), dtype=bool)).tobytes()
+    score = float(seg.get("mean_score") or 0.9)
+    # entries at both ends: the renderer holds the most recent keyframe's
+    # mask, so start/end bookend the whole range even with per-frame drift
+    return [(float(seg["start"]), full, str(top).upper(), score),
+            (float(seg["end"]), full, str(top).upper(), score)]
+
+
 def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
                   detector: NudeNetDetector, segmenter: PersonSegmenter,
                   aw: int, ah: int, batch_size: int = 16) -> dict[int, list]:
@@ -364,6 +385,14 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
                 analyze(False)
         except Exception as e:  # noqa: BLE001
             logger.warning("[blur] analysis of segment %d failed: %s", si, e)
+        if not entries:
+            fb = failsafe_entries(seg, aw, ah)
+            if fb:
+                entries = fb
+                logger.warning("[blur] segment %d [%d-%d]: no detections "
+                               "at re-analysis — full-frame fail-safe "
+                               "(label %s)", si, int(start), int(end),
+                               fb[0][2])
         per_seg[si] = entries
         logger.info("[blur] segment %d [%d-%d]%s: %d mask keyframes",
                     si, int(start), int(end),

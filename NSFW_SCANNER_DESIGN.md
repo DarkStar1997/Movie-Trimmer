@@ -501,6 +501,32 @@ frames inside a segment holds the most recent keyframe mask (upscaled
 nearest), fills solid black through it (the person silhouette), composites
 the warning overlay, and encodes with NVENC.
 
+### Silent no-op renders found and fixed (2026-11-03)
+
+The first gated Gone Girl blackout render exposed a pre-existing gap:
+8 of 37 flagged segments rendered as no-ops — blur analysis (NudeNet
+re-detection @8fps) found nothing in them, and a segment with zero mask
+keyframes was silently skipped. Two classes, two fixes:
+
+- **7 pure track-bridge segments** (`labels: {}`, mean ~0.3): flagged
+  only by the tracker's explicit-hold of sub-threshold flicker — no
+  sample ever carried a passing trigger label. Noise. Fix
+  (pipeline.demote_bridge_only): such segments are demoted to
+  `review_segments` with a `TRACK_BRIDGE` label before crowd/arbiter
+  merge, so remove-class renders never see them. Labeled bridge tails
+  (real detection + held flicker) are unaffected.
+- **1 labeled miss** (MALE_GENITALIA_EXPOSED, mean 0.52): a borderline
+  scan-time detection that did not reproduce at re-detection. Fix
+  (blur.failsafe_entries): a LABELED segment whose analysis comes up
+  empty gets full-frame black mask keyframes at its bounds — censoring
+  was promised; when the pipeline cannot find WHERE, it blacks the
+  frame rather than silently passing. Unlabeled segments get no
+  fail-safe (the scan-side demotion owns them).
+
+VLM/arbiter-born segments cannot hit either class by construction —
+their masks are the RF-DETR person union with a centered-rect fallback
+when nobody is found.
+
 ### Solid-black masks, not mosaic (2026-11-03)
 
 The effect was a 24px block pixelate until this date. It was replaced by
