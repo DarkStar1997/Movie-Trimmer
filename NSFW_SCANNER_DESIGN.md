@@ -219,8 +219,8 @@ B) *implemented* — sparse Qwen3-VL-8B arbitration (`scanner/arbiter.py`):
 frames by striding, never every frame. Strict-JSON moderation prompt,
 refusal-tolerant parsing; `arbiter_mode=verify` (annotate) or `apply`
 (add blind-spot segments, drop rejected). Model baked in — nothing
-downloads at runtime (HF_HUB_OFFLINE=1; weights re-shipped at
-ghcr.io/darkstar1997/movietrimmer-qwen3vl-weights:v1).
+downloads at runtime (HF_HUB_OFFLINE=1; weights re-shipped inside
+ghcr.io/darkstar1997/movie-trimmer-vlm-qwen3vl-30b-a3b:v1).
 C) RF-DETR Seg Medium person masks (re-shipped at
 ghcr.io/darkstar1997/movietrimmer-rfdetr-seg-weights:v1, FP32 TRT engine
 per the fitness-coach logit-drift lesson) for mask-precision blurring:

@@ -230,3 +230,7 @@ blur_outputs/
 *.mpeg
 *.m2ts
 *.ts
+
+# detector-eval results (npz binaries, like scans/)
+evals/*
+!evals/.gitkeep
