@@ -33,7 +33,7 @@ for run, movie, fn in RUNS:
     segs[run] = [(s["start"], s["end"]) for s in d["arbiter"]["new_segments"]]
 
 for variant in sys.argv[1:]:
-    res = json.load(open(f"{ROOT}/blur_outputs/replay_{variant}.json"))
+    res = json.load(open(f"{ROOT}/mask_outputs/replay_{variant}.json"))
     agree = flips = 0
     cls_stat = {}
     for fn, v in res.items():

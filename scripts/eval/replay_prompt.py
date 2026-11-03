@@ -2,7 +2,7 @@
 """Replay arbiter prompt candidates over the recorded-verdict frame set.
 
 Runs INSIDE the container (docker exec, cwd /app): repo is at /movies (ro),
-frames under /movies/.replay, results land in /blur_outputs (host-visible).
+frames under /movies/.replay, results land in /mask_outputs (host-visible).
 
 For each variant: monkeypatch scanner.arbiter.ARBITER_SYSTEM_PROMPT, judge
 every frame through the production sidecar path (_judge_with_http +
@@ -19,7 +19,7 @@ sys.path.insert(0, "/app")
 from scanner import arbiter, vlm  # noqa: E402
 
 FRAMES = Path("/movies/.replay")
-OUT = Path("/blur_outputs")
+OUT = Path("/mask_outputs")
 
 OLD = arbiter.ARBITER_SYSTEM_PROMPT
 
@@ -138,10 +138,14 @@ def judge_all_guide(name):
 
 
 vlm.acquire()
-VARIANTS = []          # ("name", PROMPT) pairs — plain prompt variants
-GUIDE_VARIANTS = ["v3guide"]   # judged per-movie with guide context
+# A/B session: "v3" is the baked production prompt judged in this same
+# session (the control); "v3guide" is the identical prompt + per-movie
+# guide context through the production film_context path.
+VARIANTS = [("v3", OLD)]
+GUIDE_VARIANTS = ["v3guide"]
 for name, prompt in VARIANTS:
     judge_all(name, prompt)
+arbiter.ARBITER_SYSTEM_PROMPT = OLD   # guide appends to production v3
 for name in GUIDE_VARIANTS:
     judge_all_guide(name)
 print("[replay] done")

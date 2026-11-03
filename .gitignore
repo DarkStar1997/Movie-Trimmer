@@ -215,6 +215,8 @@ trt_cache/
 scan_workspaces/
 scans/*
 !scans/gt_*.json
+!scans/BASELINES.md
+!scans/guide_cache/
 mask_outputs/
 
 # Movie files — never commit video content (test clips, sources, outputs)
