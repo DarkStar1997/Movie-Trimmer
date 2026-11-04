@@ -85,9 +85,7 @@ def main() -> int:
         "-v", f"{ROOT}/trt_cache:/cache/trt",
         "-v", f"{ROOT}:/movies:ro",
         "-v", f"{ROOT}/mask_outputs:/mask_outputs",
-        "-e", "ARBITER_HTTP_CONCURRENCY=8",
-        "-e", "PARALLEL=8",
-        "-e", "CTX=16384",
+        "-e", "ARBITER_HTTP_CONCURRENCY=4",
         "-e", "MASK_OUTPUT_DIR=/mask_outputs",
         "-e", "GUIDE_CACHE_DIR=/movies/scans/guide_cache",
         args.image)

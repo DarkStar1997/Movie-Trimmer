@@ -85,3 +85,52 @@ The arbiter is the scan. Two costs inside it:
    frames take the seek path.
 
 (np8 + snap-fix measurements land below as they run)
+
+**B: slots 4 -> 8 (PARALLEL=8, CTX=16384, pool 8) — NULL RESULT.**
+arbiter_s 1080 vs 1086: judging is compute-bound on this 4090 already
+at 4 slots (30B-A3B prefills saturate SMs; more slots just queue).
+Env kept: parity in wall, per-slot context unchanged (2048), VRAM
+headroom verified with the server up. Not a lever; recorded so nobody
+retries it blind.
+
+**C: extraction fix** (commit 6bec98f): ffprobe packet-PTS snap
+(0.7s) + select pass on exact frame timestamps (1856/1856 delivered,
+one 126s decode, in-container) + batches <400 frames per-seek directly
+(windows/expansion: ~0.2s/frame beats another full-movie decode).
+Sweep extraction: ~500s -> ~130s. Host ffmpeg note: this host's build
+fails to init >1.5k-term select chains (Cannot allocate memory); the
+container build handles 1.9k — unit tests keep chains small.
+
+**C result (GG, shipped build 6bec98f):**
+
+| stage | A baseline | C | |
+|---|---|---|---|
+| decode+gate | 186 | 185 | control, unchanged |
+| crowd+guide | 1.5 | 1.5 | cached |
+| arbiter | **1086** | **609** | −44% |
+| **wall** | **1273.6** | **795.7** | **−37.5% (1.60x)** |
+
+Arbiter decomposition at C: VLM judging ~410s (compute-bound, the
+honest floor for 2,059 frames through the 30B) + one 126s sweep
+decode + ~40s small-batch seeks. Segment output parity across A/B/C
+(21-24 segs, 709-726s flagged — run-to-run VLM variance, same as
+historical repeat variance).
+
+**Env reverted to -np 4 / CTX 8192 / pool 4** after C: slots 4->8
+measured parity but took VRAM from ~6GB to ~2.1GB headroom with the
+server up (22.4/24.6GB) — headroom a concurrent mask job's TRT
+engines may need. The speedup is entirely the extraction fix.
+
+## Where this leaves end-to-end (GG, 4090)
+
+| | before | after | |
+|---|---|---|---|
+| scan | 1274s | 796s | 1.60x |
+| mask render (total job) | ~700s | 586s | 1.19x |
+| scan + render | ~1974s | ~1382s | **1.43x (−30%)** |
+
+Remaining known costs, for whenever throughput matters again: VLM
+judging (~410s/2k frames, compute-bound — a smaller/faster judge model
+is the only real lever, a quality decision), the sweep decode (126s —
+shared with decode_gate if ever worth pipelining), NVENC P5 encode
+(~450fps ceiling — P4/P3 declined, table above).
