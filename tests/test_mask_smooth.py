@@ -78,11 +78,6 @@ class _StubSegmenter:
         return box(W, H, 30 + 2 * self.i, 60)
 
 
-class _StubDetector:
-    def detect_frames(self, frames):
-        return [[] for _ in frames]
-
-
 def _frames(n):
     return [np.zeros((H, W, 3), dtype=np.uint8) for _ in range(n)]
 
@@ -93,9 +88,8 @@ def test_vlm_dropout_no_center_square_jump():
     seg = _StubSegmenter(drop_frames={5, 6})
     state = {}
     masks = keyframe_masks_for(
-        _StubDetector().detect_frames(_frames(10)), _frames(10),
-        policy=None, segmenter=seg, dilate_px=4, vlm_source=True,
-        vlm_score=0.9, src_label="VLM", track_state=state, smooth_px=3)
+        _frames(10), segmenter=seg, dilate_px=4,
+        vlm_score=0.9, src_label="VLM", state=state, smooth_px=3)
     areas = [int(m.sum()) for m, _, _ in masks]
     # steady-state person box ~40x40 + dilation; a center-square jump
     # would be ~(0.7*320)*(0.7*180) = ~35k px — 2x+ the person area
@@ -111,24 +105,21 @@ def test_vlm_first_frame_nobody_uses_center_fallback():
             return None
 
     masks = keyframe_masks_for(
-        _StubDetector().detect_frames(_frames(2)), _frames(2),
-        policy=None, segmenter=_Empty(), dilate_px=4, vlm_source=True,
-        vlm_score=0.9, src_label="VLM", track_state={}, smooth_px=3)
+        _frames(2), segmenter=_Empty(), dilate_px=4,
+        vlm_score=0.9, src_label="VLM", state={}, smooth_px=3)
     frac = config.MASK_VLM_CENTER_FRAC
     expect = (frac * W) * (frac * H)
     assert all(expect <= int(m.sum()) <= expect * 1.3 for m, _, _ in masks)
 
 
 def test_carry_persists_across_batches():
-    """track_state carries sm_prev between keyframe_masks_for calls
+    """state carries sm_prev between keyframe_masks_for calls
     (analysis_pass batches frames): the second batch continues the
     smoothing chain instead of restarting it."""
     state = {}
-    for half in (range(0, 4), range(4, 8)):
+    for _ in (0, 1):
         frames = _frames(4)
         keyframe_masks_for(
-            _StubDetector().detect_frames(frames), frames,
-            policy=None, segmenter=_StubSegmenter(), dilate_px=4,
-            vlm_source=True, vlm_score=0.9, src_label="VLM",
-            track_state=state, smooth_px=3)
+            frames, segmenter=_StubSegmenter(), dilate_px=4,
+            vlm_score=0.9, src_label="VLM", state=state, smooth_px=3)
     assert state.get("sm_prev") is not None and state["sm_prev"].any()

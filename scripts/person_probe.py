@@ -1,7 +1,7 @@
 """Person-pass probe: run ONLY the RF-DETR gate over a movie at 2fps.
 
 Mirrors the scan loop's gate wiring (PersonGateRunner + open_decoder +
-per-batch sync) without the NudeNet detector, so gate recall can be
+per-batch sync) standalone, so gate recall can be
 audited on the GPU before a full scan is committed to:
 
   host> docker compose exec -T movie-trimmer \

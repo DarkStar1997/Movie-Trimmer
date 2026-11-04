@@ -7,8 +7,10 @@ kept intact — a stale plan can never be silently reused:
     {TRT_CACHE_DIR}/{gpu_slug}/{trt_slug}/{base}.{weights_vN}.{engine}
 
 Precision policy (production lessons from visiontouch):
-  - YOLOv8 detectors (NudeNet): FP16 engines — safe, 2x throughput.
-    `fp32=True` stays available as the escape hatch if label flips appear.
+  - Segmentation/detection engines where FP16 was validated safe run FP16
+    (2x throughput); `fp32=True` stays available as the escape hatch if
+    label flips appear (RF-DETR needs it: TRT 11 strongly-typed FP16
+    drifts its logits by ~9).
   - TRT >= 11 strongly-typed networks take precision from the ONNX itself,
     hence the modelopt fp16 cast with the fp16 -> mixed -> noconv fallback.
 """
@@ -70,8 +72,8 @@ def _content_hash(path: str, _size: int, _mtime: int) -> str:
 
 
 def weights_version(source: str) -> str:
-    """``nudenet_640m_v1.onnx`` -> ``v1-ab12cd34``: the filename version
-    (see config.MODELS naming) plus a content fingerprint."""
+    """``rfdetr_seg_m_v1.onnx`` -> ``v1-ab12cd34``: the filename version
+    plus a content fingerprint."""
     stem = os.path.splitext(os.path.basename(source))[0]
     m = re.search(r"_v(\d+(?:\.\d+)*)", stem)
     v = f"v{m.group(1)}" if m else "v0"
@@ -268,7 +270,7 @@ class TrtEngine:
         sync=False leaves the pass in flight on its stream: the caller owns
         the join (stream/event synchronize) BEFORE consuming the returned
         buffers. Used by the scan-time person gate to overlap the RF-DETR
-        engine with the NudeNet engine on separate streams."""
+        engine with decode on a separate stream."""
         import torch
 
         trt = self._trt

@@ -1,4 +1,4 @@
-"""Stage C tests: personseg decode math, mask helpers, end-to-end render.
+"""Stage C tests: personseg postprocess math, mask helpers, end-to-end render.
 
 The pure-function tests need no weights. The end-to-end test mocks the
 mask source (synthetic clips have no nudity) but runs the real decode ->
@@ -13,12 +13,8 @@ import tempfile
 import numpy as np
 import pytest
 
-from scanner.mask import (blackout_rgb, box_mask, dilate_mask,
-                          explicit_boxes, intersect_with_box, pad_box,
-                          _writer_args)
-from scanner.detector import Detection
-from scanner.personseg import PERSON_CLASS, decode, preprocess
-from scanner.policy import Policy
+from scanner.mask import (blackout_rgb, box_mask, dilate_mask, _writer_args)
+from scanner.personseg import PERSON_CLASS, persons_union, preprocess
 
 
 # --- personseg -------------------------------------------------------------------
@@ -41,97 +37,44 @@ def _fake_outs(q=6, c=91, h=40, w=60):
     return labels, dets, masks
 
 
-def test_decode_selects_matching_person():
+def test_persons_union_unions_every_person():
+    """Two person instances in different frame regions both land in the
+    union — the mask path masks EVERY person the segmenter finds."""
     labels, dets, masks = _fake_outs()
-    # query 3, class PERSON: dominant score; a person box in the left half
-    labels[0, 3, PERSON_CLASS] = 3.0                 # sigmoid ~0.95
-    dets[0, 3] = [0.25, 0.5, 0.3, 0.5]               # cx cy w h normalized
-    masks[0, 3] = 5.0                                # whole mask positive
-    match_box = np.asarray([5.0, 5.0, 25.0, 35.0])   # overlaps left half
-    mask, area, score, pbbox = decode(
-        {"dets": dets, "labels": labels, "masks": masks},
-        {"dets": "dets", "labels": "labels", "masks": "masks"},
-        40, 60, match_box)
-    assert mask is not None and score > 0.9
-    assert mask.shape == (40, 60)
-    assert area > 0.9                                 # mask fully positive
-    # the person box (6,10,24,30) overlaps match_box enough to count as
-    # matched -> callers may use this mask as the full-person mask
-    assert pbbox is not None
-    assert pbbox.tolist() == pytest.approx([6.0, 10.0, 24.0, 30.0],
-                                           abs=1e-3)
-
-
-def test_decode_containment_match():
-    """A part box (breast/genitalia) sits INSIDE the person box: IoU is low
-    by construction, but containment >=60% must still count as a match."""
-    labels, dets, masks = _fake_outs()
-    labels[0, 1, PERSON_CLASS] = 3.0
-    dets[0, 1] = [0.5, 0.5, 0.6, 0.8]               # person: 12..48 x 4..36
-    masks[0, 1] = 5.0
-    part = np.asarray([22.0, 14.0, 34.0, 24.0])      # fully inside the person
-    mask, area, score, pbbox = decode(
-        {"dets": dets, "labels": labels, "masks": masks},
-        {"dets": "dets", "labels": "labels", "masks": "masks"},
-        40, 60, part)
-    assert mask is not None and pbbox is not None    # containment matched
-
-
-def test_decode_unmatched_returns_no_bbox():
-    """When nothing matches the box the caller must be told: the returned
-    mask is just the top-scoring person and must NOT be used as a
-    full-person mask for the box's subject (wrong-person risk)."""
-    labels, dets, masks = _fake_outs()
+    labels[0, 1, PERSON_CLASS] = 3.0                 # sigmoid ~0.95
     labels[0, 3, PERSON_CLASS] = 3.0
-    dets[0, 3] = [0.5, 0.5, 0.2, 0.2]               # person: 24..36 x 16..24
-    masks[0, 3] = 5.0
-    far = np.asarray([0.0, 0.0, 10.0, 10.0])         # no overlap, no contain
-    mask, area, score, pbbox = decode(
+    dets[0, 1] = [0.25, 0.5, 0.3, 0.5]               # left half
+    dets[0, 3] = [0.75, 0.5, 0.3, 0.5]               # right half
+    masks[0, 1] = -5.0
+    masks[0, 3] = -5.0
+    masks[0, 1, :, :40] = 5.0                         # positive left third
+    masks[0, 3, :, 68:] = 5.0                         # positive right third
+    union = persons_union(
         {"dets": dets, "labels": labels, "masks": masks},
         {"dets": "dets", "labels": "labels", "masks": "masks"},
-        40, 60, far)
-    assert mask is not None and pbbox is None
+        40, 60)
+    assert union is not None and union.shape == (40, 60)
+    # both sides covered (bilinear resize of a step edge shaves a px)
+    assert union[:, :18].all() and union[:, 42:].all()
+    assert not union[:, 26:34].any()                  # gap in between
 
 
-def test_decode_no_person_returns_none():
+def test_persons_union_no_person_returns_none():
     labels, dets, masks = _fake_outs()
     labels[0, 2, 5] = 4.0        # high score, but class 5 (not person)
-    mask, area, score, pbbox = decode(
+    union = persons_union(
         {"dets": dets, "labels": labels, "masks": masks},
         {"dets": "dets", "labels": "labels", "masks": "masks"},
-        40, 60, None)
-    assert mask is None and score == 0.0 and pbbox is None
+        40, 60)
+    assert union is None
 
 
 # --- mask helpers -------------------------------------------------------------------
 
-def test_pad_box_clips():
-    out = pad_box(np.asarray([0., 0., 100., 50.]), 0.5, 200, 100)
-    # pad 50% of own w/h per side: [-50,-25,150,75] clipped to the frame
-    assert out.tolist() == [0.0, 0.0, 150.0, 75.0]
-
-
-def test_box_mask_and_intersect():
+def test_box_mask():
     bm = box_mask(np.asarray([10, 10, 30, 20]), 60, 40)
     assert bm.sum() == 20 * 10
-    person = np.zeros((40, 60), dtype=bool)
-    person[5:35, 5:40] = True
-    inter = intersect_with_box(person, np.asarray([10, 10, 30, 20]))
-    assert inter.sum() == 10 * 20
-    assert not inter[:10, :].any()
-
-
-def test_explicit_boxes_filters_by_policy():
-    policy = Policy()   # 0.45 triggers, 0.005 area floor at defaults
-    dets = [
-        Detection("FEMALE_BREAST_EXPOSED", 0.60, (10, 10, 60, 40)),   # ok
-        Detection("FEMALE_BREAST_EXPOSED", 0.30, (10, 10, 60, 40)),   # score
-        Detection("BUTTOCKS_EXPOSED", 0.90, (0, 0, 2, 2)),            # area
-        Detection("BELLY_EXPOSED", 0.90, (10, 10, 60, 40)),           # review
-    ]
-    boxes = explicit_boxes(dets, policy, 640, 270)
-    assert len(boxes) == 1
-    assert boxes[0].tolist() == [10, 10, 70, 50]
+    assert bm[10:20, 10:30].all()
 
 
 def test_blackout_only_inside_mask():
@@ -160,19 +103,14 @@ def test_writer_args():
     assert "-spatial-aq" in nv and "-tune" in nv
 
 
-# --- keyframe mask semantics (full person / fallback / VLM / tracking) ---------------
+# --- keyframe mask semantics (all-persons / fallback) ---------------------------------
 
 class _FakeSeg:
-    """Scripted person segmenter: pops scripted infer() results."""
+    """Scripted person segmenter: pops scripted all_persons() results."""
     def __init__(self, results):
-        self.results = list(results)      # [(mask, bbox) | None per call]
-    def infer(self, frame, match_box=None):
-        mask, bbox = self.results.pop(0)
-        return mask, (float(mask.mean()) if mask is not None else 0.0), \
-            0.9, bbox
+        self.results = list(results)      # [mask | None per call]
     def all_persons(self, frame):
-        mask, _ = self.results.pop(0)
-        return mask
+        return self.results.pop(0)
 
 
 def _person_mask(h=40, w=60):
@@ -181,75 +119,38 @@ def _person_mask(h=40, w=60):
     return m
 
 
-def test_keyframe_masks_full_person_not_part_intersection():
-    seg = _FakeSeg([(_person_mask(), np.asarray([6.0, 4.0, 48.0, 36.0]))])
-    frame = np.zeros((40, 60, 3), dtype=np.uint8)
-    dets = [Detection("FEMALE_BREAST_EXPOSED", 0.60, (20, 15, 10, 10))]
-    from scanner.mask import keyframe_masks_for
-    (mask, label, score), = keyframe_masks_for(
-        [dets], [frame], Policy(), seg, dilate_px=1)
-    # FULL person mask: far larger than the part box (20,15,30,25)
-    assert mask.sum() == _person_mask().sum()
-    assert label == "FEMALE_BREAST_EXPOSED" and score == 0.60
-
-
-def test_keyframe_box_fallback_when_unmatched():
-    # person found but does NOT match the box -> padded box rect, never the
-    # wrong person's mask. box (2,2,8,8) padded 0.35/side -> (0,0,10,10)
-    seg = _FakeSeg([(_person_mask(), None)])
-    frame = np.zeros((40, 60, 3), dtype=np.uint8)
-    dets = [Detection("FEMALE_BREAST_EXPOSED", 0.60, (2, 2, 6, 6))]
-    from scanner.mask import keyframe_masks_for
-    (mask, _, _), = keyframe_masks_for(
-        [dets], [frame], Policy(), seg, dilate_px=1)
-    assert mask.sum() == 10 * 10
-    assert mask[:10, :10].all()
-    assert mask.sum() != _person_mask().sum()   # NOT the wrong person
-
-
-def test_keyframe_tracking_bridges_detector_flicker():
-    # frame 1: detector fires, person matches (bbox tracked)
-    # frame 2: detector silent -> tracked bbox re-matched, full mask stays
-    # frame 3: tracker loses the person -> empty mask, tracking resets
-    seg = _FakeSeg([
-        (_person_mask(), np.asarray([6.0, 4.0, 48.0, 36.0])),
-        (_person_mask(), np.asarray([6.0, 4.0, 48.0, 36.0])),
-        (_person_mask(), None),
-    ])
-    frame = np.zeros((40, 60, 3), dtype=np.uint8)
-    dets = [Detection("FEMALE_BREAST_EXPOSED", 0.60, (20, 15, 10, 10))]
-    from scanner.mask import keyframe_masks_for
-    m1, m2, m3 = keyframe_masks_for(
-        [dets, [], []], [frame] * 3, Policy(), seg, dilate_px=1)
-    assert m1[0].sum() == _person_mask().sum()
-    assert m2[0].sum() == _person_mask().sum()   # bridged: still masked
-    assert m2[1] == "FEMALE_BREAST_EXPOSED"      # overlay label carried
-    assert not m3[0].any()                       # person gone: no mask
-
-
-def test_keyframe_vlm_source_masks_all_persons():
-    seg = _FakeSeg([(_person_mask(), None)])
+def test_keyframe_masks_all_persons():
+    seg = _FakeSeg([_person_mask()])
     frame = np.zeros((40, 60, 3), dtype=np.uint8)
     from scanner.mask import keyframe_masks_for
     (mask, label, score), = keyframe_masks_for(
-        [[]], [frame], Policy(), seg, dilate_px=1,
-        vlm_source=True, vlm_score=0.98)
+        [frame], seg, dilate_px=1, vlm_score=0.98)
     assert mask.sum() == _person_mask().sum()
     assert label == "VLM" and score == 0.98
 
 
-def test_keyframe_vlm_center_fallback():
-    seg = _FakeSeg([(None, None)])               # segmenter finds nobody
+def test_keyframe_center_fallback():
+    seg = _FakeSeg([None])                      # segmenter finds nobody
     frame = np.zeros((40, 60, 3), dtype=np.uint8)
     from scanner.mask import keyframe_masks_for
     from scanner import config
     (mask, label, score), = keyframe_masks_for(
-        [[]], [frame], Policy(), seg, dilate_px=1,
-        vlm_source=True, vlm_score=0.95)
+        [frame], seg, dilate_px=1, vlm_score=0.95)
     frac = config.MASK_VLM_CENTER_FRAC
     expect = int(round(60 * frac)) * int(round(40 * frac))
     assert abs(mask.sum() - expect) < 8          # centered rect ~ frac^2 area
     assert mask[20, 30] and not mask[0, 0]       # center yes, corner no
+
+
+def test_keyframe_custom_src_label():
+    """Crowd segments carry CRINGEMDB:<cat> labels into the overlay."""
+    seg = _FakeSeg([_person_mask()])
+    frame = np.zeros((40, 60, 3), dtype=np.uint8)
+    from scanner.mask import keyframe_masks_for
+    (mask, label, score), = keyframe_masks_for(
+        [frame], seg, dilate_px=1, vlm_score=0.8,
+        src_label="CRINGEMDB:SEX")
+    assert label == "CRINGEMDB:SEX" and score == 0.8
 
 
 # --- warning overlay -----------------------------------------------------------------
@@ -273,7 +174,6 @@ def test_draw_warning_red_text_top_left():
 def test_run_mask_end_to_end(monkeypatch):
     import scanner.mask as mask
     from scanner.mask import run_mask
-    from scanner.policy import Policy as P
 
     with tempfile.TemporaryDirectory() as td:
         clip = f"{td}/src.mp4"
@@ -284,16 +184,15 @@ def test_run_mask_end_to_end(monkeypatch):
              "-t", "6", "-c:v", "libx264", "-pix_fmt", "yuv420p", clip],
             check=True)
 
-        # fake the two model stages: no detections, center-block mask +
-        # label/score for the overlay
+        # fake the segmenter: center-block mask + label/score for the overlay
         monkeypatch.setattr(
             mask, "keyframe_masks_for",
-            lambda results, frames, policy, seg, dilate_px, **kw: [
+            lambda frames, segmenter, dilate_px, **kw: [
                 (_center_mask(f.shape[0], f.shape[1]),
                  "FEMALE_BREAST_EXPOSED", 0.83) for f in frames])
 
         res = run_mask(clip, [{"start": 2.0, "end": 4.0}], out,
-                       policy=P(), backend="ort",
+                       backend="ort",
                        window=(0.5, 5.5))
 
         # window previews take the pipe path; this host has NVENC (hevc)
@@ -368,8 +267,8 @@ def test_analysis_pass_on_segment_delivers_entries_inline(tmp_path):
         events.append(("cb", si))
         got[si] = entries
 
-    ret = analysis_pass(clip, segs, Policy(), None, _StaticSeg(),
-                        aw, ah, on_segment=on_segment)
+    ret = analysis_pass(clip, segs, _StaticSeg(), aw, ah,
+                        on_segment=on_segment)
     events.append(("ret", None))
 
     # callbacks fired in segment order, all before the return existed

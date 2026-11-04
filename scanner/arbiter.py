@@ -5,25 +5,23 @@ Structure (pure functions first, heavy runner last):
   plan_frames()    pure, testable: which timestamps deserve a VLM look and why
   parse_verdict()  pure: robust strict-JSON verdict extraction + refusal detect
   aggregate()      pure: segment confirm/reject verdicts + new blind-spot
-                   segments (reuses temporal.smooth_segments)
+                   segments (SmoothingConfig params drive clustering)
   extract_frames() ffmpeg single-pass frame extraction for the plan
   run_arbiter()    the runner: extract -> lazy VLM load -> batched inference
                    -> aggregate. torch/transformers import happens HERE only,
                    so the module is importable in the torch-free host venv.
 
 Planning policy (trusted sources + person gate; see config):
-  - trusted: NudeNet detector segments + crowd ranges are mask-final
-    regardless of VLM opinion (apply mode is add-only) — NEVER sampled
+  - trusted: crowd ranges are mask-final regardless of VLM opinion
+    (apply mode is add-only) — NEVER sampled
   - person gate: the RF-DETR pass (scanner/persongate.py) marks where
-    anybody is on screen; NudeNet proxy-class hits (body-part
-    detections) open the gate at their instants. Gate off/failed =
-    whole timeline eligible (fail-open)
+    anybody is on screen. Gate off/failed = whole timeline eligible
+    (fail-open)
   - window: ~1fps sampling in the gaps hugging trusted edges (before
     starts, after ends) — flicker continuations and near-miss
     boundaries live there; person-gated
   - sweep: one frame per ARBITER_SWEEP_EVERY_S across person-present,
     nothing-trusted timeline — the blind-spot backbone
-  - weak/companion: NudeNet sub-threshold/orphan triggers, ungated
   - ARBITER_MAX_FRAMES <= 0 (default): uncapped; a cap thins by striding
     (never truncated to only the early part of the movie)
 """
@@ -52,7 +50,6 @@ from . import vlm
 logger = logging.getLogger(__name__)
 
 # priority tiers for the frame budget
-PRIO_WEAK = 4
 PRIO_WINDOW = 2
 PRIO_SWEEP = 1
 
@@ -141,29 +138,22 @@ class PlannedFrame:
 
 def plan_frames(duration: float, segments: list[dict], *,
                 person_ranges: list[tuple[float, float]] | None = None,
-                person_points: list[float] = (),
                 window_before_s: float = config.ARBITER_WINDOW_BEFORE_S,
                 window_after_s: float = config.ARBITER_WINDOW_AFTER_S,
                 window_step_s: float = config.ARBITER_WINDOW_STEP_S,
                 sweep_every_s: float = config.ARBITER_SWEEP_EVERY_S,
                 max_frames: int = config.ARBITER_MAX_FRAMES,
                 sweep_budget_frac: float = config.ARBITER_SWEEP_BUDGET_FRAC,
-                weak_hits: list[float] = (),
-                weak_max: int = config.ARBITER_WEAK_MAX_FRAMES,
-                companion_hits: list[float] = (),
                 ) -> list[PlannedFrame]:
     """Curate the sparse VLM frame list.
 
-    Trusted-source policy: `segments` here are NudeNet-detector + crowd
-    ranges, mask-final regardless of VLM opinion (apply mode is
-    add-only) — the VLM NEVER samples inside them. It watches only where
-    they don't fire AND (person gate) where somebody is present:
-    `person_ranges` from the RF-DETR pass (None = gate off or failed
-    open — the whole timeline is eligible), plus `person_points` (NudeNet
-    proxy-class hits: a body-part detection is person evidence and opens
-    the gate at that instant). Weak/companion triggers stay ungated —
-    they carry their own detector evidence. max_frames <= 0 = uncapped;
-    a cap is applied by striding, never truncation."""
+    Trusted-source policy: `segments` here are crowd ranges, mask-final
+    regardless of VLM opinion (apply mode is add-only) — the VLM NEVER
+    samples inside them. It watches only where they don't fire AND
+    (person gate) where somebody is present: `person_ranges` from the
+    RF-DETR pass (None = gate off or failed open — the whole timeline
+    is eligible). max_frames <= 0 = uncapped; a cap is applied by
+    striding, never truncation."""
     if duration <= 0:
         return []
     planned: dict[float, PlannedFrame] = {}   # rounded t -> frame (max prio)
@@ -183,30 +173,11 @@ def plan_frames(duration: float, segments: list[dict], *,
         return any(a <= t <= b for a, b in seg_bounds)
 
     gate_bounds = list(person_ranges) if person_ranges is not None else None
-    gate_pts = {round(float(t), 3) for t in person_points}
 
     def person_present(t: float) -> bool:
         if gate_bounds is None:
             return True                    # gate off / failed open
-        if round(t, 3) in gate_pts:
-            return True                    # NudeNet proxy-class evidence
         return any(a <= t <= b for a, b in gate_bounds)
-
-    # 0) weak detector hits: targeted, few, highest value per frame —
-    #    sub-threshold trigger scores the VLM gets to arbitrate (skipped
-    #    when the moment already sits inside a trusted segment). Ungated:
-    #    the detector firing IS person evidence.
-    for t in weak_hits:
-        if not in_segment(t):
-            add(t, PRIO_WEAK, "weak")
-
-    # 0b) orphan companions: orphan-flagged samples (detector >= trigger
-    #     threshold, run discarded by smoothing) get their +-0.5s
-    #     neighbors judged too — a sub-second flash is wider than one
-    #     sampling phase, and the orphan sample can land at its edge
-    for t in companion_hits:
-        if not in_segment(t):
-            add(t, PRIO_WEAK, "companion")
 
     # 1) windows hugging trusted segments (never inside one): their edges
     #    are where scene spill lives — starts that begin early, ends that
@@ -238,8 +209,7 @@ def plan_frames(duration: float, segments: list[dict], *,
             add(k, PRIO_SWEEP, "sweep")
         k += sweep_every_s
 
-    # --- budget: weak + companions always; sweep guaranteed a share; windows
-    # the rest (weak first: targeted frames, capped tightly upstream).
+    # --- budget: sweep guaranteed a share; windows the rest.
     # max_frames <= 0 = UNCAPPED: every planned frame is judged. ---
     capped = max_frames > 0
     frames = list(planned.values())
@@ -254,13 +224,7 @@ def plan_frames(duration: float, segments: list[dict], *,
         step = len(items) / budget
         return [items[int(i * step)] for i in range(budget)]
 
-    kept = thin(by_reason.get("weak", []),
-                min(weak_max, max_frames) if capped else weak_max)
-    kept += thin([f for f in by_reason.get("companion", [])
-                  if f.t not in {k.t for k in kept}],
-                 min(2 * weak_max, max_frames - len(kept))
-                 if capped else 2 * weak_max)
-    budget = (max_frames - len(kept)) if capped else None
+    budget = max_frames if capped else None
     # sweep BEFORE windows: it is the only global coverage and loses the
     # budget race otherwise (windows hug already-flagged segments)
     sweeps = thin(by_reason.get("sweep", []),
@@ -269,7 +233,7 @@ def plan_frames(duration: float, segments: list[dict], *,
     budget = (budget - len(sweeps)) if capped else None
     windows = thin(by_reason.get("window", []), budget)
 
-    out = sorted(kept + windows + sweeps, key=lambda f: f.t)
+    out = sorted(windows + sweeps, key=lambda f: f.t)
     return out
 
 
@@ -281,7 +245,7 @@ def plan_expansion(hit_ts: list[float], judged: set[float],
                    ) -> list[PlannedFrame]:
     """Second-pass frames measuring the extent of explicit point hits.
 
-    Sweep/weak hits are point samples padded blind (±ARBITER_SWEEP_PAD_S).
+    Sweep hits are point samples padded blind (±ARBITER_SWEEP_PAD_S).
     When one flips explicit, its neighborhood goes back on the VLM at
     window density (1s grid): neighbors that also flip chain with the
     original hit and measure the scene's real extent — a measured segment
@@ -379,13 +343,12 @@ def aggregate(planned: list[PlannedFrame], verdicts: list[dict | None],
             "mean_confidence": round(conf, 3),
         })
 
-    # hits outside segments -> new-segment candidates. Sweep and weak hits
-    # are POINT samples (no 1s grid around them): pad them wide; window hits
+    # hits outside segments -> new-segment candidates. Sweep hits are
+    # POINT samples (no 1s grid around them): pad them wide; window hits
     # keep the normal pad (their neighborhood is densely sampled).
     hits = sorted((f.t, v["confidence"],
                    config.ARBITER_SWEEP_PAD_S
-                   if f.reason in ("sweep", "weak", "companion")
-                   else smoothing.pad_s)
+                   if f.reason == "sweep" else smoothing.pad_s)
                   for f, v in zip(planned, verdicts)
                   if v is not None and v["explicit"] and f.seg_idx is None)
     chain_gap = _chain_gap(planned)
@@ -823,21 +786,16 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
                 *, smoothing: SmoothingConfig,
                 model_id: str = config.DEFAULT_ARBITER_MODEL,
                 mode: str = "verify",
-                weak_hits: list[float] = (),
-                companion_hits: list[float] = (),
                 person_ranges: list[tuple[float, float]] | None = None,
-                person_points: list[float] = (),
                 workdir: Path | None = None,
                 film_context: str = "") -> dict:
     """Full sparse arbitration pass. Never raises: returns an error block.
 
-    `segments` are the TRUSTED ranges (NudeNet detector + crowd): never
-    sampled inside. `person_ranges` gates the sweep/windows (None = gate
-    off or failed open = whole timeline). `person_points` are NudeNet
-    proxy-class hit times — body-part evidence that opens the gate.
-    `film_context` (guide=true) appends community parents-guide items
-    to the system prompt as STEP-2 tie-break background; '' keeps the
-    prompt byte-identical."""
+    `segments` are the TRUSTED ranges (crowd): never sampled inside.
+    `person_ranges` gates the sweep/windows (None = gate off or failed
+    open = whole timeline). `film_context` (guide=true) appends community
+    parents-guide items to the system prompt as STEP-2 tie-break
+    background; '' keeps the prompt byte-identical."""
     t0 = time.monotonic()
     result: dict = {"model": model_id, "mode": mode, "frames_checked": 0,
                     "refusals": 0, "segment_verdicts": [], "new_segments": [],
@@ -846,10 +804,7 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
     vlm_acquired = False
     try:
         planned = plan_frames(duration, segments,
-                              person_ranges=person_ranges,
-                              person_points=person_points,
-                              weak_hits=list(weak_hits),
-                              companion_hits=list(companion_hits))
+                              person_ranges=person_ranges)
         result["planned_frames"] = len(planned)
         result["planned_by_reason"] = dict(
             Counter(f.reason for f in planned))
@@ -859,8 +814,8 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
 
         # on-demand VLM: bring llama-server up BEFORE frame extraction so
         # the model load overlaps ffmpeg. A bring-up failure raises into
-        # the handler below -> loud error block, scan continues
-        # detector-only (the same contract as any arbiter failure).
+        # the handler below -> loud error block, scan continues without
+        # VLM discovery (the same contract as any arbiter failure).
         if config.ARBITER_BASE_URL:
             vlm.acquire()
             vlm_acquired = True
@@ -900,7 +855,7 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
             all_planned = list(planned)
             verdicts = [parse_verdict(r) for r in raw]
 
-            # second pass: explicit point hits (sweep/weak) get their
+            # second pass: explicit point hits (sweep) get their
             # neighborhood measured at window density with the SAME loaded
             # model — converts a blind ±pad guess into a chained, measured
             # segment. Highest-confidence hits first; capped. Add-only:
@@ -908,7 +863,7 @@ def run_arbiter(video_path: str, duration: float, segments: list[dict],
             point_hits = sorted(
                 ((f, v) for f, v in zip(planned, verdicts)
                  if v is not None and v["explicit"] and f.seg_idx is None
-                 and f.reason in ("sweep", "weak", "companion")),
+                 and f.reason == "sweep"),
                 key=lambda fv: -fv[1]["confidence"])
             if point_hits:
                 exp = plan_expansion(

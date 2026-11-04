@@ -21,74 +21,15 @@ TRT_CACHE_DIR = Path(os.environ.get("TRT_CACHE_DIR", "trt_cache"))
 # Uploaded scan inputs (host or container-local scratch)
 SCAN_WORKSPACE_DIR = Path(os.environ.get("SCAN_WORKSPACE_DIR", "scan_workspaces"))
 
-# --- Models ----------------------------------------------------------------
-# name -> (onnx filename stem, inference resolution). Resolution must match the
-# model the weights were trained at (NudeNet v3.4: 320n@320, 640m@640).
-MODELS: dict[str, tuple[str, int]] = {
-    "320n": ("nudenet_320n_v1.onnx", 320),
-    "640m": ("nudenet_640m_v1.onnx", 640),
-}
-DEFAULT_MODEL = "640m"
-
-# Decode resolution fed to the detector. Wider than tall: the detector
-# letterbox-pads to square itself (reference NudeNet behaviour), so a 16:9
-# frame arrives as full width + black bottom pad. Full-width detail is what
-# matters; height padding costs the model nothing we can recover anyway.
+# --- Decode -----------------------------------------------------------------
+# Decode resolution for the scan's sample stream (feeds the RF-DETR person
+# gate; the arbiter judges frames extracted separately at ARBITER_FRAME_W).
 DECODE_WIDTH = 640
 DECODE_HEIGHT = 360
 
 # --- Scan defaults ----------------------------------------------------------
 DEFAULT_SAMPLE_FPS = 4.0
-DEFAULT_BATCH_SIZE = 16
 MAX_CONCURRENT_SCANS = 1
-
-# --- NudeNet label taxonomy (EXACT order of ONNX output channels 4..21) -----
-NUDENET_LABELS: list[str] = [
-    "FEMALE_GENITALIA_COVERED",   # 0
-    "FACE_FEMALE",                # 1
-    "BUTTOCKS_EXPOSED",           # 2
-    "FEMALE_BREAST_EXPOSED",      # 3
-    "FEMALE_GENITALIA_EXPOSED",   # 4
-    "MALE_BREAST_EXPOSED",        # 5
-    "ANUS_EXPOSED",               # 6
-    "FEET_EXPOSED",               # 7
-    "BELLY_COVERED",              # 8
-    "FEET_COVERED",               # 9
-    "ARMPITS_COVERED",            # 10
-    "ARMPITS_EXPOSED",            # 11
-    "FACE_MALE",                  # 12
-    "BELLY_EXPOSED",              # 13
-    "MALE_GENITALIA_EXPOSED",     # 14
-    "ANUS_COVERED",               # 15
-    "FEMALE_BREAST_COVERED",      # 16
-    "BUTTOCKS_COVERED",           # 17
-]
-
-# --- Default label policy ----------------------------------------------------
-# triggers  -> any qualifying detection marks the frame NSFW (auto-cut segment)
-# review    -> flagged separately for human review, never auto-cut
-DEFAULT_TRIGGER_LABELS: dict[str, float] = {
-    "FEMALE_GENITALIA_EXPOSED": 0.45,
-    "MALE_GENITALIA_EXPOSED": 0.45,
-    "ANUS_EXPOSED": 0.45,
-    "FEMALE_BREAST_EXPOSED": 0.45,
-    "BUTTOCKS_EXPOSED": 0.45,
-}
-DEFAULT_REVIEW_LABELS: dict[str, float] = {
-    "BELLY_EXPOSED": 0.60,
-    "ARMPITS_EXPOSED": 0.60,
-    "FEET_EXPOSED": 0.60,
-}
-# Ignore boxes smaller than this fraction of frame area (posters, background
-# TVs, tiny far-away figures).
-DEFAULT_MIN_BOX_AREA_FRAC = 0.005
-
-# Person-gate proxy classes: every NudeNet class that is NOT an explicit
-# trigger is body-part/person evidence (faces, *_COVERED, belly, feet,
-# armpits) — hits >= PERSON_GATE_PROXY_SCORE open the arbiter gate at
-# that instant even where RF-DETR sees nobody.
-PERSON_GATE_PROXY_LABELS = tuple(
-    l for l in NUDENET_LABELS if l not in DEFAULT_TRIGGER_LABELS)
 
 # --- Temporal smoothing defaults ---------------------------------------------
 # (see temporal.SmoothingConfig docstring for semantics)
@@ -104,37 +45,18 @@ DEFAULT_SMOOTHING = {
     "pad_s": 1.5,                  # safety padding on both ends
 }
 
-# --- Detector post-processing (parity with nudenet 3.4.2 reference) ----------
-DETECT_SCORE_THRESHOLD = 0.2   # candidate collection threshold
-NMS_SCORE_THRESHOLD = 0.25    # NMS entry threshold
-NMS_IOU_THRESHOLD = 0.45     # class-agnostic, as in the reference
-
-# --- Stage A: tracking (explicit-hold bridging) --------------------------------
-# ByteTrack-style person-cluster tracking (scanner/tracking.py). Deterministic,
-# no extra model: keeps a scene flagged while its person track (which last
-# carried an explicit label within TRACK_EXPLICIT_HOLD_S) stays alive through
-# sub-threshold flicker. A *_COVERED counterpart clears the hold (re-clothed).
-DEFAULT_TRACK = True
-TRACK_EXPLICIT_HOLD_S = 8.0
-TRACK_REFRESH_FLOOR = 0.15    # sub-trigger explicit score that still refreshes
-TRACK_MAX_LOST_SAMPLES = 3    # coasting samples (~0.75s @4fps) before retirement
-
 # --- Stage A2: RF-DETR person gate (arbiter pre-filter) -------------------------
-# Trusted-source policy: NudeNet detector segments and crowd ranges are
-# mask-final regardless of VLM opinion (apply mode is add-only), so the
-# VLM never samples INSIDE them. And a frame with no person cannot host
-# explicit content, so the VLM sweep only runs where RF-DETR medium sees
-# somebody (PERSON_GATE_*), OR where NudeNet itself fired a body-part
-# class (proxy points — *_COVERED / FACE_* / review classes are person
-# evidence, free at 4fps). FAIL-OPEN: any gate failure = full sweep.
+# Trusted-source policy: crowd ranges are mask-final regardless of VLM
+# opinion (apply mode is add-only), so the VLM never samples INSIDE
+# them. And a frame with no person cannot host explicit content, so the
+# VLM sweep only runs where RF-DETR medium sees somebody (PERSON_GATE_*).
+# FAIL-OPEN: any gate failure = full sweep.
 PERSON_GATE_ENABLED = bool(
     int(os.environ.get("PERSON_GATE_ENABLED", "1")))
 PERSON_GATE_FPS = float(os.environ.get("PERSON_GATE_FPS", "2.0"))
 PERSON_GATE_SCORE = float(os.environ.get("PERSON_GATE_SCORE", "0.25"))
 PERSON_GATE_OPEN_SAMPLES = 2    # person persists 1s @2fps to open a range
 PERSON_GATE_CLOSE_GAP_SAMPLES = 4   # 2s absent closes it (brief occlusion)
-PERSON_GATE_PROXY_SCORE = float(
-    os.environ.get("PERSON_GATE_PROXY_SCORE", "0.30"))
 
 # --- Stage C: person segmentation + mask render --------------------------------
 # RF-DETR Seg Medium (COCO person class only at runtime; FP32 TRT engine).
@@ -150,7 +72,6 @@ PERSON_SEG = {
 # temporally stable silhouettes on motion; the old fixed 8fps rate made
 # held masks step/lag visibly. >0 = fixed analysis rate (economy mode).
 MASK_KEYFRAME_FPS = 0.0
-MASK_BOX_PAD_FRAC = 0.35    # explicit box padding before mask intersection
 MASK_DILATE_FRAC = 0.012   # mask dilation, fraction of frame width
 # Temporal mask smoothing (2026-11-04): per-frame person masks are
 # independent segmentations, which flickers and wobbles during motion.
@@ -181,7 +102,7 @@ MASK_CQ = 26                # NVENC constant-quality (libx264 crf equivalent)
 # Env kill-switch: MASK_OVERLAY=0 disables.
 MASK_OVERLAY = os.environ.get("MASK_OVERLAY", "1").lower() not in (
     "0", "false", "no", "off")
-# VLM-sourced (arbiter-found) segments have no NudeNet box; when the person
+# VLM-sourced (arbiter-found) segments carry no box; when the person
 # segmenter also finds nobody (extreme close-ups), mask this fraction of the
 # frame centered — conservative by design (VLM confidence is >=0.9 there).
 MASK_VLM_CENTER_FRAC = 0.7
@@ -227,10 +148,10 @@ GUIDE_MAX_ITEMS = 12          # items in the prompt block
 GUIDE_ITEM_MAX_CHARS = 220    # per-item truncation
 
 # --- Stage B: VLM arbiter (sparse Qwen3-VL pass) -------------------------------
-# Never every frame: the person-gated sweep (10s grid where RF-DETR sees
-# a person, outside trusted NudeNet/crowd ranges), windows hugging trusted
-# edges, weak/companion/proxy NudeNet triggers — uncapped by default
-# (ARBITER_MAX_FRAMES > 0 re-enables striding caps).
+# Never every frame: the person-gated sweep (5s grid where RF-DETR sees
+# a person, outside trusted crowd ranges) plus windows hugging trusted
+# edges — uncapped by default (ARBITER_MAX_FRAMES > 0 re-enables
+# striding caps).
 DEFAULT_ARBITER = False
 # Identity of the shipped arbiter: Qwen3-VL-30B-A3B-Instruct (UD-Q4_K_XL
 # GGUF), served by llama-server — the on-demand supervisor inside the
@@ -261,18 +182,7 @@ ARBITER_SWEEP_BUDGET_FRAC = float(
 # Pad each sweep hit by this much when clustering into new segments, and
 # re-measure its neighborhood at 1s density (expansion pass).
 ARBITER_SWEEP_PAD_S = float(os.environ.get("ARBITER_SWEEP_PAD_S", "10.0"))
-# Sub-threshold NudeNet trigger hits (score in [ARBITER_WEAK_MIN_SCORE,
-# the label's trigger threshold)) never reach smoothing, but in the dim/
-# distant blind-spot region they are the detector's only voice (Ex Machina
-# GT: FEMALE_GENITALIA 0.25-0.26 @3327/3342.5, BUTTOCKS 0.36-0.44 @3388 —
-# raw scores below the 0.45 trigger). Cluster peaks go to the VLM as
-# targeted "weak" frames; a confirmed hit becomes a padded add-only
-# segment exactly like a sweep hit.
-ARBITER_WEAK_MIN_SCORE = float(
-    os.environ.get("ARBITER_WEAK_MIN_SCORE", "0.25"))
-ARBITER_WEAK_MAX_FRAMES = int(
-    os.environ.get("ARBITER_WEAK_MAX_FRAMES", "120"))
-# Second pass: measure the extent of explicit point hits (sweep/weak) by
+# Second pass: measure the extent of explicit point hits (sweep) by
 # re-sampling their ±ARBITER_SWEEP_PAD_S neighborhood at window density.
 # Capped; highest-confidence hits expand first. Both baseline movies
 # saturated 96 — doubled alongside the 5s sweep, which finds more
@@ -281,7 +191,7 @@ ARBITER_EXPAND_MAX_FRAMES = int(
     os.environ.get("ARBITER_EXPAND_MAX_FRAMES", "192"))
 ARBITER_MODES = ("verify", "apply")  # verify: annotate; apply: also merge
 # apply is the default: merging is add-only (VLM can never remove a
-# NudeNet/crowd segment), and a submission that forgets the mode must
+# crowd segment), and a submission that forgets the mode must
 # never silently drop the VLM's found segments again (the verify-default
 # trap, which cost a full day of debugging — see design doc).
 DEFAULT_ARBITER_MODE = os.environ.get("DEFAULT_ARBITER_MODE", "apply")

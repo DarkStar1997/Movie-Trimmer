@@ -15,7 +15,6 @@ from typing import Any, Dict, Optional
 
 from . import config
 from .pipeline import run_scan
-from .policy import Policy
 from .temporal import SmoothingConfig
 
 logger = logging.getLogger(__name__)
@@ -40,35 +39,30 @@ def new_scan_entry(video_name: str) -> str:
     return scan_id
 
 
-async def run_scan_job(scan_id: str, video_path: str,                       policy_overrides: Optional[dict],
+async def run_scan_job(scan_id: str, video_path: str,
                        smoothing_overrides: Optional[dict],
-                       sample_fps: float, model: Optional[str],
-                       backend: str, fp32: bool,
+                       sample_fps: float,
                        workspace: Optional[Path] = None, *,
-                       track: bool = True, arbiter: bool = False,
+                       arbiter: bool = False,
                        arbiter_model: Optional[str] = None,
                        arbiter_mode: str = config.DEFAULT_ARBITER_MODE,
                        crowd: bool = False,
                        crowd_title: Optional[str] = None,
                        crowd_year: Optional[int] = None,
-                       guide: bool = False,
-                       detector_enabled: bool = True) -> None:
+                       guide: bool = False) -> None:
     """Background task: run the scan off the event loop, store the result."""
     entry = scan_store[scan_id]
     try:
         async with scan_semaphore:
             entry["status"] = "processing"
-            policy = Policy.from_overrides(policy_overrides)
             smoothing = SmoothingConfig.from_overrides(smoothing_overrides)
             fn = functools.partial(
                 run_scan, video_path,
-                policy=policy, smoothing=smoothing,
-                sample_fps=sample_fps, model=model,
-                backend=backend, fp32=fp32,
-                track=track, arbiter=arbiter,
+                smoothing=smoothing,
+                sample_fps=sample_fps, arbiter=arbiter,
                 arbiter_model=arbiter_model, arbiter_mode=arbiter_mode,
                 crowd=crowd, crowd_title=crowd_title, crowd_year=crowd_year,
-                guide=guide, detector_enabled=detector_enabled)
+                guide=guide)
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, fn)
 
@@ -136,8 +130,8 @@ def resolve_segments(segments_json: Any, scan_id: str | None) -> list[dict]:
     for seg in segments_json:
         if isinstance(seg, dict):
             # full segment dicts (a saved scan's `segments` array): keep
-            # labels/mean_score — 'arbiter' in labels marks VLM-found
-            # segments that stage C must mask without NudeNet boxes
+            # labels/mean_score — they carry the overlay label + crowd
+            # category for stage C
             a, b = float(seg["start"]), float(seg["end"])
         else:
             a, b = float(seg[0]), float(seg[1])
@@ -153,10 +147,9 @@ def resolve_segments(segments_json: Any, scan_id: str | None) -> list[dict]:
 
 
 async def run_mask_job(mask_id: str, video_path: str, segments: list[dict],
-                        policy_overrides: Optional[dict],
-                        window: Optional[tuple], cq: Optional[int],
-                        output_name: Optional[str] = None,
-                        bake_chapters: bool = True) -> None:
+                       window: Optional[tuple], cq: Optional[int],
+                       output_name: Optional[str] = None,
+                       bake_chapters: bool = True) -> None:
     entry = mask_store[mask_id]
     entry["video_path"] = video_path
     entry["segments"] = segments
@@ -164,13 +157,12 @@ async def run_mask_job(mask_id: str, video_path: str, segments: list[dict],
         async with mask_semaphore:
             entry["status"] = "processing"
             from .mask import run_mask
-            policy = Policy.from_overrides(policy_overrides)
             out_dir = Path(config.MASK_OUTPUT_DIR)
             out_dir.mkdir(parents=True, exist_ok=True)
             out = out_dir / (output_name or f"masked_{mask_id[:8]}.mp4")
             entry["output"] = str(out)
             fn = functools.partial(
-                run_mask, video_path, segments, str(out), policy=policy,
+                run_mask, video_path, segments, str(out),
                 window=window, cq=cq)
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, fn)

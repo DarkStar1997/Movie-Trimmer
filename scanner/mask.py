@@ -5,18 +5,10 @@ Two passes over the movie:
   analysis (cheap, flagged ranges only)
     For each remove-segment, decode [start, end] at MASK_KEYFRAME_FPS
     (default: every frame at native fps) and
-    analysis size (the scan's decode size — detection parity). Run NudeNet
-    per batch; per keyframe the censor mask is:
-
-      detector segments — union over trigger-passing boxes of the MATCHED
-      person's full-body mask (the whole person is masked, not just the
-      part box); padded box-rect fallback when no person matches (close-up
-      crops where the person detector fails are exactly when the box
-      matters). When NudeNet flickers off, the last matched person box is
-      re-matched so the person stays masked while in frame (tracking).
-      Arbiter/VLM-found segments have no boxes by construction (NudeNet's
-      blind spots) — every person the segmenter finds is masked, with a
-      centered-frame-rectangle fallback.
+    analysis size (the scan's decode size). Per keyframe the censor
+    mask is: every person the segmenter finds, with a centered-frame-
+    rectangle fallback when it finds nobody (extreme close-ups — the
+    source saw nudity, so err wide).
 
     Every masked keyframe carries (label, score) for the warning overlay;
     at render time each flagged frame gets red top-left text
@@ -63,9 +55,7 @@ import numpy as np
 from . import config
 from .decode import (DecoderStalled, FFmpegPipeDecoder, probe_dimensions,
                      probe_duration)
-from .detector import Detection, NudeNetDetector
 from .personseg import PersonSegmenter
-from .policy import Policy
 
 logger = logging.getLogger(__name__)
 
@@ -119,16 +109,6 @@ def strip_subtitles(path: str, workdir: str) -> str:
 
 # --- pure helpers (host-testable) ------------------------------------------------
 
-def pad_box(box_xyxy: np.ndarray, pad_frac: float,
-            frame_w: int, frame_h: int) -> np.ndarray:
-    """Expand a box by pad_frac of its own w/h per side, clipped to frame."""
-    x1, y1, x2, y2 = box_xyxy.astype(np.float64)
-    w, h = x2 - x1, y2 - y1
-    return np.clip([x1 - w * pad_frac, y1 - h * pad_frac,
-                    x2 + w * pad_frac, y2 + h * pad_frac],
-                   0, [frame_w, frame_h, frame_w, frame_h])
-
-
 def box_mask(box_xyxy: np.ndarray, frame_w: int, frame_h: int) -> np.ndarray:
     m = np.zeros((frame_h, frame_w), dtype=bool)
     x1, y1, x2, y2 = np.clip(box_xyxy, 0, None).astype(int)
@@ -136,32 +116,6 @@ def box_mask(box_xyxy: np.ndarray, frame_w: int, frame_h: int) -> np.ndarray:
     if x2 > x1 and y2 > y1:
         m[y1:y2, x1:x2] = True
     return m
-
-
-def intersect_with_box(mask: np.ndarray, box_xyxy: np.ndarray) -> np.ndarray:
-    m = mask.copy()
-    h, w = m.shape
-    x1, y1, x2, y2 = np.clip(box_xyxy, 0, None).astype(int)
-    m[:max(0, y1), :] = False
-    m[min(h, y2):, :] = False
-    m[:, :max(0, x1)] = False
-    m[:, min(w, x2):] = False
-    return m
-
-
-def explicit_boxes(dets: list[Detection], policy: Policy,
-                   frame_w: int, frame_h: int) -> list[np.ndarray]:
-    """xyxy boxes of detections that pass the policy triggers."""
-    out = []
-    for d in dets:
-        thr = policy.triggers.get(d.label)
-        if thr is None or d.score < thr:
-            continue
-        if d.area_fraction(frame_w, frame_h) < policy.min_box_area_frac:
-            continue
-        x, y, w, h = d.box
-        out.append(np.asarray([x, y, x + w, y + h], dtype=np.float32))
-    return out
 
 
 def dilate_mask(mask: np.ndarray, kernel_px: int) -> np.ndarray:
@@ -244,109 +198,59 @@ def draw_warning(canvas_rgb: np.ndarray, label: str, score: float,
         y += step
 
 
-def keyframe_masks_for(dets_per_frame, frames, policy, segmenter,
-                       dilate_px: int, vlm_source: bool = False,
+def keyframe_masks_for(frames, segmenter,
+                       dilate_px: int,
                        vlm_score: float = 0.9,
                        src_label: str = "VLM",
-                       track_state: dict | None = None,
+                       state: dict | None = None,
                        smooth_px: int = 0
                        ) -> list[tuple[np.ndarray, str, float]]:
     """Per keyframe (mask, label, score) at analysis res for one batch.
 
-    Detector-sourced segments: for each explicit-part box the matched
-    person's FULL mask is used (not the part-box intersection — the brief
-    is to mask the whole person). When no person matches the box, the
-    padded box rectangle is the fallback (close-up crops where the person
-    detector fails are exactly when the box matters; an unmatched person
-    mask would risk masking the wrong person). NudeNet flicker is bridged
-    by re-matching the last matched person box (track_state) so the person
-    stays masked for as long as they remain in frame.
-
-    VLM-sourced segments (arbiter-found blind spots): NudeNet is blind
-    exactly there, so masks come from masking EVERY person the segmenter
-    finds, with a center-box fallback when it finds nobody.
+    Segments come from VLM arbitration / crowd timestamps — no detector
+    boxes by construction — so the mask is every person the segmenter
+    finds, with a center-box fallback when it finds nobody (the source
+    saw nudity, so err wide). state carries the temporal-smoothing carry
+    across batches (per segment).
     """
-    state = track_state if track_state is not None else {}
+    state = state if state is not None else {}
     out: list[tuple[np.ndarray, str, float]] = []
-    for frame, dets in zip(frames, dets_per_frame):
+    for frame in frames:
         h, w = frame.shape[:2]
-        union = np.zeros((h, w), dtype=bool)
-        label, score = "", 0.0
-
-        if vlm_source:
-            # arbiter/crowd segment: no NudeNet boxes by construction —
-            # mask all persons; the source saw nudity, so err wide
-            pmask = segmenter.all_persons(frame)
-            raw = (pmask if pmask is not None and pmask.any()
-                   else np.zeros((h, w), dtype=bool))
-            prev = state.get("sm_prev")
-            if (not raw.any() and prev is not None and prev.any()
-                    and smooth_px > 1):
-                # segmenter dropout mid-segment: ride the eroding carry
-                # instead of jumping to the big center-square fallback
-                final = temporal_step(raw, prev, 0, smooth_px)
-                state["sm_prev"] = final
-                out.append((final, src_label, vlm_score))
-                continue
-            if not raw.any():
-                frac = config.MASK_VLM_CENTER_FRAC
-                raw = box_mask(
-                    np.asarray([(1 - frac) * w / 2, (1 - frac) * h / 2,
-                                (1 + frac) * w / 2, (1 + frac) * h / 2]),
-                    w, h)
-            final = temporal_step(raw, prev, dilate_px, smooth_px)
+        # mask all persons; the source saw nudity, so err wide
+        pmask = segmenter.all_persons(frame)
+        raw = (pmask if pmask is not None and pmask.any()
+               else np.zeros((h, w), dtype=bool))
+        prev = state.get("sm_prev")
+        if (not raw.any() and prev is not None and prev.any()
+                and smooth_px > 1):
+            # segmenter dropout mid-segment: ride the eroding carry
+            # instead of jumping to the big center-square fallback
+            final = temporal_step(raw, prev, 0, smooth_px)
             state["sm_prev"] = final
             out.append((final, src_label, vlm_score))
             continue
-
-        # strongest trigger-passing detection this frame (for the overlay)
-        for d in dets:
-            thr = policy.triggers.get(d.label)
-            if (thr is not None and d.score >= thr and d.score > score
-                    and d.area_fraction(w, h) >= policy.min_box_area_frac):
-                label, score = d.label, d.score
-
-        boxes = explicit_boxes(dets, policy, w, h)
-        if boxes:
-            for bx in boxes:
-                pmask, _, _, pbbox = segmenter.infer(frame, match_box=bx)
-                if pmask is not None and pbbox is not None:
-                    union |= pmask               # FULL person mask
-                    state["bbox"] = pbbox        # track for flicker frames
-                    state["label"], state["score"] = label, score
-                else:
-                    padded = pad_box(bx, config.MASK_BOX_PAD_FRAC, w, h)
-                    union |= box_mask(padded, w, h)
-        elif state.get("bbox") is not None:
-            # NudeNet flickered off but the person may still be in frame:
-            # re-match the tracked person and keep their full mask on
-            pmask, _, _, pbbox = segmenter.infer(frame,
-                                                 match_box=state["bbox"])
-            if pmask is not None and pbbox is not None:
-                union |= pmask
-                state["bbox"] = pbbox
-                label = state.get("label", "")
-                score = state.get("score", 0.0)
-            else:
-                state["bbox"] = None             # person left the frame
-        final = temporal_step(union, state.get("sm_prev"),
-                              dilate_px, smooth_px)
+        if not raw.any():
+            frac = config.MASK_VLM_CENTER_FRAC
+            raw = box_mask(
+                np.asarray([(1 - frac) * w / 2, (1 - frac) * h / 2,
+                            (1 + frac) * w / 2, (1 + frac) * h / 2]),
+                w, h)
+        final = temporal_step(raw, prev, dilate_px, smooth_px)
         state["sm_prev"] = final
-        out.append((final, label, score))
+        out.append((final, src_label, vlm_score))
     return out
 
 
 # --- analysis pass ----------------------------------------------------------------
 
 def failsafe_entries(seg: dict, aw: int, ah: int) -> list[tuple]:
-    """Full-frame mask keyframes for a labeled segment whose analysis pass
-    found nothing — the scan-time detection (4fps) failed to reproduce at
-    re-detection (8fps; Gone Girl 2026-11-03: a borderline 0.52
-    MALE_GENITALIA_EXPOSED segment). Censoring was promised for the range;
-    when the pipeline cannot find WHERE, it blacks the whole frame rather
-    than silently rendering an unmasked no-op. Unlabeled (pure
-    track-bridge) segments return [] — scan-side demotion routes those to
-    review before a render ever sees them."""
+    """Full-frame mask keyframes for a labeled segment whose analysis
+    pass found nothing — the scan-time source (VLM/crowd) failed to
+    reproduce at mask time. Censoring was promised for the range; when
+    the pipeline cannot find WHERE, it blacks the whole frame rather
+    than silently rendering an unmasked no-op. Unlabeled segments
+    return [] — sources without a label never reach a render."""
     labs = seg.get("labels") or {}
     if not labs:
         return []
@@ -359,18 +263,16 @@ def failsafe_entries(seg: dict, aw: int, ah: int) -> list[tuple]:
             (float(seg["end"]), full, str(top).upper(), score)]
 
 
-def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
-                  detector: NudeNetDetector, segmenter: PersonSegmenter,
+def analysis_pass(video_path: str, segments: list[dict],
+                  segmenter: PersonSegmenter,
                   aw: int, ah: int, batch_size: int = 16,
                   on_segment=None) -> dict[int, list]:
     """-> {segment_index: [(t, packed_mask_bytes, label, score), ...]} by t.
 
-    label/score ride along for the warning overlay: the trigger label +
-    score for detector segments, "VLM" + arbiter confidence for
-    arbiter-found segments (identified by 'arbiter' in seg['labels']),
-    "CRINGEMDB:<category>" + crowd score for community-timestamp
-    segments (labels starting with 'cringemdb'). Both non-detector
-    sources mask every person, with a center fallback.
+    label/score ride along for the warning overlay: "VLM" + arbiter
+    confidence for arbiter-found segments (identified by 'arbiter' in
+    seg['labels']), "CRINGEMDB:<category>" + crowd score for
+    community-timestamp segments (labels starting with 'cringemdb').
 
     on_segment(si, entries) fires right after each segment's entries are
     final — the analysis/render overlap hands the render its per-segment
@@ -392,20 +294,16 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
         labs = seg.get("labels") or {}
         crowd_lab = next((l for l in labs if str(l).startswith("cringemdb")),
                          None)
-        vlm = "arbiter" in labs or crowd_lab is not None
         vlm_score = float(seg.get("mean_score")
                           or (config.CROWD_SCORE if crowd_lab else 0.9))
         src_label = crowd_lab.upper() if crowd_lab else "VLM"
-        track_state: dict = {}
+        state: dict = {}
 
         def flush(frames, first_idx):
-            results = (detector.detect_frames(frames) if detector is not None
-                       else [()] * len(frames))
-            masks = keyframe_masks_for(results, frames, policy, segmenter,
-                                       dilate_px, vlm_source=vlm,
+            masks = keyframe_masks_for(frames, segmenter, dilate_px,
                                        vlm_score=vlm_score,
                                        src_label=src_label,
-                                       track_state=track_state,
+                                       state=state,
                                        smooth_px=smooth_px)
             for j, (m, label, score) in enumerate(masks):
                 if m.any():
@@ -447,16 +345,15 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
             fb = failsafe_entries(seg, aw, ah)
             if fb:
                 entries = fb
-                logger.warning("[mask] segment %d [%d-%d]: no detections "
-                               "at re-analysis — full-frame fail-safe "
-                               "(label %s)", si, int(start), int(end),
-                               fb[0][2])
+                logger.warning("[mask] segment %d [%d-%d]: no person "
+                                "masks at re-analysis — full-frame "
+                                "fail-safe (label %s)", si, int(start),
+                                int(end), fb[0][2])
         per_seg[si] = entries
         if on_segment is not None:
             on_segment(si, entries)
-        logger.info("[mask] segment %d [%d-%d]%s: %d mask keyframes",
-                    si, int(start), int(end),
-                    " (vlm)" if vlm else "", len(entries))
+        logger.info("[mask] segment %d [%d-%d]: %d mask keyframes",
+                    si, int(start), int(end), len(entries))
     return per_seg
 
 
@@ -586,7 +483,7 @@ def render_pass(video_path: str, out_path: str, segments: list[dict],
 
 
 def run_mask(video_path: str, segments: list[dict], out_path: str, *,
-             policy: Policy, backend: str = "trt",
+             backend: str = "trt",
              window: tuple[float, float] | None = None,
              cq: int = None) -> dict:
     """Full stage-C pipeline: analysis (masks) -> render.
@@ -609,15 +506,8 @@ def run_mask(video_path: str, segments: list[dict], out_path: str, *,
     from .decode import analysis_size
     aw, ah = analysis_size(w, h, config.DECODE_WIDTH)
 
-    # NudeNet is only needed to re-detect boxes for detector-sourced
-    # segments; arbiter/crowd (VLM-source) segments mask via the person
-    # segmenter alone, so NudeNet-free scans never load it
-    def _vlm_sourced(s: dict) -> bool:
-        labs = s.get("labels") or {}
-        return ("arbiter" in labs
-                or any(str(k).startswith("cringemdb") for k in labs))
-    detector = (NudeNetDetector(backend=backend)
-                if any(not _vlm_sourced(s) for s in segments) else None)
+    # segments are VLM/crowd-sourced — masks come from the person
+    # segmenter alone (all-persons + center fallback)
     segmenter = PersonSegmenter(backend="trt" if backend != "ort" else "ort")
     out_path = str(out_path)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -643,8 +533,8 @@ def run_mask(video_path: str, segments: list[dict], out_path: str, *,
         # assignment rather than del — the names are captured by the
         # overlap thread's closure; with it joined, these are the last
         # strong references and the engines free here.
-        nonlocal detector, segmenter
-        detector = segmenter = None
+        nonlocal segmenter
+        segmenter = None
         try:
             import torch
             torch.cuda.empty_cache()
@@ -652,8 +542,7 @@ def run_mask(video_path: str, segments: list[dict], out_path: str, *,
             pass
 
     if not overlap:
-        per_seg = analysis_pass(video_path, segments, policy, detector,
-                                segmenter, aw, ah)
+        per_seg = analysis_pass(video_path, segments, segmenter, aw, ah)
         analysis_done[0] = time.monotonic()
         if not any(per_seg.values()):
             raise RuntimeError("analysis produced no masks — nothing to mask")
@@ -687,8 +576,8 @@ def run_mask(video_path: str, segments: list[dict], out_path: str, *,
                 # per_seg is populated by _on_segment as segments finish;
                 # the return value adds nothing the callbacks haven't
                 # already delivered
-                analysis_pass(video_path, segments, policy, detector,
-                              segmenter, aw, ah, on_segment=_on_segment)
+                analysis_pass(video_path, segments, segmenter, aw, ah,
+                              on_segment=_on_segment)
             except Exception as e:  # noqa: BLE001
                 analysis_err.append(e)
                 for ev in ready.values():   # wake every waiter to fail

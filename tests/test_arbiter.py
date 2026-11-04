@@ -18,7 +18,7 @@ from scanner.temporal import SmoothingConfig
 # --- planning --------------------------------------------------------------------
 
 def test_plan_never_samples_inside_segments():
-    """Trusted-source policy: detector/crowd segments are mask-final; the
+    """Trusted-source policy: crowd segments are mask-final; the
     VLM never looks inside them (verify frames removed with the policy)."""
     segs = [{"start": 100.0, "end": 110.0}, {"start": 300.0, "end": 310.0}]
     planned = plan_frames(600.0, segs)
@@ -116,16 +116,6 @@ def test_plan_person_gate_off_covers_whole_timeline():
     sweep = [f.t for f in planned if f.reason == "sweep"]
     assert any(t < 100.0 for t in sweep)
     assert any(t > 300.0 for t in sweep)
-
-
-def test_plan_person_points_open_gate_at_instants():
-    """NudeNet proxy-class hits (body-part detections) are person
-    evidence: the gate opens at those exact instants."""
-    planned = plan_frames(600.0, [], person_ranges=[(100.0, 110.0)],
-                          person_points=[400.0])
-    ts = [f.t for f in planned if f.reason == "sweep"]
-    assert 100.0 in ts and 110.0 in ts and 400.0 in ts
-    assert not any(120.0 <= t <= 390.0 for t in ts)
 
 
 def test_plan_uncapped_is_the_default_posture():
@@ -352,26 +342,13 @@ def test_is_hf_weights_dir_requires_config_json(tmp_path):
     assert not is_hf_weights_dir(tmp_path / "some-hf-model" / "config.json")
 
 
-# --- weak detector hits ----------------------------------------------------------
+# --- point-hit padding / expansion -----------------------------------------------
 
-def test_plan_weak_hits_added_and_skipped_inside_segments():
-    segs = [{"start": 100.0, "end": 110.0}]
-    planned = plan_frames(600.0, segs, weak_hits=[50.0, 105.0, 200.0])
-    weak = [f for f in planned if f.reason == "weak"]
-    assert sorted(f.t for f in weak) == [50.0, 200.0]   # 105 sits in a segment
-
-
-def test_plan_weak_capped_without_starving_sweep():
-    planned = plan_frames(600.0, [], weak_hits=[float(i * 5) for i in range(10)],
-                          weak_max=3, max_frames=50)
-    weak = [f for f in planned if f.reason == "weak"]
-    assert len(weak) == 3
-    assert any(f.reason == "sweep" for f in planned)
-
-
-def test_aggregate_pads_weak_hits_like_sweep(monkeypatch):
+def test_aggregate_pads_sweep_hits_wide(monkeypatch):
+    """Sweep hits are point samples -> padded by ARBITER_SWEEP_PAD_S;
+    window hits keep the (smaller) smoothing pad."""
     monkeypatch.setattr(config, "ARBITER_SWEEP_PAD_S", 8.0)
-    planned = [PlannedFrame(100.0, 4, "weak"),
+    planned = [PlannedFrame(100.0, 1, "sweep"),
                PlannedFrame(400.0, 1, "sweep"),
                PlannedFrame(500.0, 2, "window")]
     ex = {"explicit": True, "labels": [], "confidence": 0.9}
@@ -397,25 +374,6 @@ def test_plan_expansion_budget_spent_on_best_hits_first():
     ts = [f.t for f in exp]
     assert len(ts) == 10                    # first (highest-conf) hit only
     assert all(392.0 <= t <= 408.0 for t in ts)
-
-
-def test_plan_companions_tiered_after_weak():
-    segs = []
-    planned = plan_frames(600.0, segs, weak_hits=[100.0],
-                          companion_hits=[99.5, 100.5],
-                          max_frames=60, weak_max=10)
-    reasons = {f.reason for f in planned}
-    assert {"weak", "companion"} <= reasons
-    ts = [f.t for f in planned if f.reason == "companion"]
-    assert 99.5 in ts and 100.5 in ts
-
-
-def test_aggregate_pads_companions_like_sweep(monkeypatch):
-    monkeypatch.setattr(config, "ARBITER_SWEEP_PAD_S", 8.0)
-    planned = [PlannedFrame(200.0, 4, "companion")]
-    ex = {"explicit": True, "labels": [], "confidence": 0.9}
-    out = aggregate(planned, [ex], 600.0, SmoothingConfig(pad_s=1.5), [])
-    assert [(s["start"], s["end"]) for s in out["new_segments"]] == [(192.0, 208.0)]
 
 
 # --- HTTP backend (pure pieces; no sockets on the host) --------------------------

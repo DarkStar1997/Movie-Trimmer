@@ -50,7 +50,8 @@ CLEAN_HOT_MAX = 2000
 def auto_spots(segments: list[dict], duration_s: float,
                n_clean: int = 3) -> tuple[list[int], list[float]]:
     """Deterministic default spot-check selection: segment 0 plus the
-    first segment of each provenance class (detector / crowd / arbiter),
+    first segment of each provenance class (legacy detector-era
+    EXPOSED labels / crowd / arbiter),
     and clean times evenly spread across the movie, nudged clear of all
     segments. Generic — derived from labels, never hardcoded indices."""
     def first_where(pred) -> int | None:

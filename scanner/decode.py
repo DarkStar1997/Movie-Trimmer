@@ -48,8 +48,7 @@ def probe_dimensions(path: str) -> tuple[int, int]:
 def analysis_size(src_w: int, src_h: int, target_w: int = 640) -> tuple[int, int]:
     """Aspect-preserving analysis frame size: width pinned to target_w for
     landscape sources (height rounded to even for yuv), height pinned for
-    portrait. Scope (2.39:1) films keep their aspect — the detector pads to
-    square itself, exactly like the reference implementation."""
+    portrait. Scope (2.39:1) films keep their aspect."""
     if src_w >= src_h:
         w = target_w
         h = max(2, int(round(src_h * target_w / src_w / 2)) * 2)

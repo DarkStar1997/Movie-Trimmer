@@ -1,4 +1,4 @@
-"""RF-DETR Seg Medium person segmenter (stage C: mask-precision censoring).
+"""RF-DETR Seg Medium person segmenter (stages A2/C).
 
 Ported from fitness-coach `visioncoach.models.PersonSegmenter`, keeping the
 numerics identical:
@@ -11,16 +11,13 @@ numerics identical:
   decode (rfdetr PostProcess replicated) — sigmoid over ALL query x class
     logits, global top-k (num_select), q_idx = flat // C, label = flat % C,
     boxes cxcywh normalized -> xyxy scaled to the frame; keep person
-    (class 1 in COCO-91 indexing) above PERSON_DETECT_THRESHOLD.
-
-  match_box association — person instance with best IoU against the
-    explicit-part box (fall back to top score below MATCH_IOU); mask logits
-    of only the selected query bilinear-interpolated to frame size, > 0.
+    (class 1 in COCO-91 indexing) above PERSON_DETECT_THRESHOLD; union the
+    mask logits of every kept query bilinear-interpolated to frame size.
 
 Precision: TRT engine is FP32 (fitness-coach lesson — TRT 11 strongly-typed
 FP16 drifts RF-DETR logits by ~9; trt.TrtEngine(fp32=True) builds from the
 original ONNX untouched). ORT is the host/test path and equivalence
-reference, same as the NudeNet detector.
+reference.
 """
 
 from __future__ import annotations
@@ -32,7 +29,6 @@ import cv2
 import numpy as np
 
 from . import config
-from .detector import OrtBackend
 
 logger = logging.getLogger(__name__)
 
@@ -42,17 +38,17 @@ _STDS = np.asarray([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
 
 PERSON_CLASS = 1          # COCO-91 indexing (0 is background)
 PERSON_DETECT_THRESHOLD = 0.35
-MATCH_IOU = 0.3
 NUM_SELECT = 300
 
 
-def _box_iou(a, b) -> float:
-    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
-    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
-    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-    ua = ((a[2] - a[0]) * (a[3] - a[1])
-          + (b[2] - b[0]) * (b[3] - b[1]) - inter)
-    return inter / ua if ua > 0 else 0.0
+class _OrtSession:
+    """Minimal ONNX Runtime wrapper (host/test backend)."""
+
+    def __init__(self, onnx_path: str):
+        import onnxruntime as ort
+        self.sess = ort.InferenceSession(
+            onnx_path, providers=["CPUExecutionProvider"])
+        self.input_name = self.sess.get_inputs()[0].name
 
 
 def preprocess(frame_rgb: np.ndarray, size: int) -> np.ndarray:
@@ -68,69 +64,6 @@ def preprocess(frame_rgb: np.ndarray, size: int) -> np.ndarray:
     r = cv2.resize(frame_rgb, (size, size), interpolation=cv2.INTER_LINEAR)
     t = r.astype(np.float32).transpose(2, 0, 1) / 255.0
     return np.ascontiguousarray(((t - _MEANS) / _STDS)[None])
-
-
-def decode(outs: dict, in_names_map: dict, h0: int, w0: int,
-           match_box: np.ndarray | None,
-           num_select: int = NUM_SELECT,
-           det_thr: float = PERSON_DETECT_THRESHOLD
-           ) -> tuple[np.ndarray | None, float, float, np.ndarray | None]:
-    """Raw outputs -> (mask HxW bool | None, mask_area_fraction, score,
-    person_bbox xyxy | None).
-
-    person_bbox is set only when the match to `match_box` succeeded (IoU
-    above MATCH_IOU, or the explicit-part box is >=60% inside the person
-    box — containment matters for part boxes, whose IoU against a person
-    box is inherently low). Unmatched callers must NOT use the returned
-    mask as a full-person mask: it is whatever person scored highest.
-    """
-    logits = np.asarray(outs[in_names_map["labels"]], dtype=np.float32)
-    boxes_cxcy = np.asarray(outs[in_names_map["dets"]], dtype=np.float32)
-    masks = np.asarray(outs[in_names_map["masks"]], dtype=np.float32)
-    _, n_q, n_c = logits.shape
-    k = min(num_select, n_q * n_c)
-    prob = 1.0 / (1.0 + np.exp(-logits.reshape(-1)))       # sigmoid
-    top_flat = np.argpartition(prob, -k)[-k:]
-    top_scores = prob[top_flat]
-    order = np.argsort(-top_scores)
-    top_flat, top_scores = top_flat[order], top_scores[order]
-    q_idx = top_flat // n_c
-    labels = top_flat % n_c
-
-    b = boxes_cxcy[0][q_idx]                               # (K,4) normalized
-    xyxy = np.stack([b[:, 0] - b[:, 2] / 2, b[:, 1] - b[:, 3] / 2,
-                     b[:, 0] + b[:, 2] / 2, b[:, 1] + b[:, 3] / 2], axis=-1)
-    xyxy *= np.asarray([w0, h0, w0, h0], dtype=np.float32)
-
-    keep = (top_scores >= det_thr) & (labels == PERSON_CLASS)
-    if not keep.any():
-        return None, 0.0, 0.0, None
-    boxes_k, scores_k = xyxy[keep], top_scores[keep]
-    rows_k = np.nonzero(keep)[0]
-
-    r = int(np.argmax(scores_k))
-    matched_bbox: np.ndarray | None = None
-    if match_box is not None:
-        best_key, best_r = -1.0, r
-        for i, bx in enumerate(boxes_k):
-            iou = _box_iou(bx, match_box)
-            x1, y1 = max(bx[0], match_box[0]), max(bx[1], match_box[1])
-            x2, y2 = min(bx[2], match_box[2]), min(bx[3], match_box[3])
-            mb_area = max(0.0, (match_box[2] - match_box[0])
-                          * (match_box[3] - match_box[1]))
-            contained = (max(0.0, x2 - x1) * max(0.0, y2 - y1)
-                         / mb_area) if mb_area > 0 else 0.0
-            key = max(iou, contained)
-            if key > best_key:
-                best_key, best_r = key, int(i)
-        if best_key > MATCH_IOU or best_key > 0.6:
-            r = best_r
-            matched_bbox = boxes_k[r]
-
-    m_logits = masks[0, q_idx[rows_k[r]]]                  # (108,108)
-    m = cv2.resize(m_logits, (w0, h0), interpolation=cv2.INTER_LINEAR)
-    mask = m > 0.0
-    return mask, float(mask.mean()), float(scores_k[r]), matched_bbox
 
 
 def persons_union(outs: dict, in_names_map: dict, h0: int, w0: int,
@@ -179,7 +112,7 @@ def person_presence(outs: dict, in_names_map: dict,
 
 
 class PersonSegmenter:
-    """person mask for an explicit-part box, via TRT FP32.
+    """Person masks via RF-DETR Seg (TRT FP32 in production).
 
     "ort" is accepted explicitly for host unit tests; production is TRT-only
     with no silent fallback — a TRT failure fails the job loudly."""
@@ -194,7 +127,7 @@ class PersonSegmenter:
             self._init_trt()
             self.backend_name = "trt"
         elif backend == "ort":
-            self.ort = OrtBackend(self.onnx_path)
+            self.ort = _OrtSession(self.onnx_path)
             self._names = self._ort_names()
             self.backend_name = "ort"
         else:
@@ -231,52 +164,10 @@ class PersonSegmenter:
         self._torch = torch
 
     # -- inference ----------------------------------------------------------
-    def infer(self, frame_rgb: np.ndarray,
-              match_box: np.ndarray | None = None) -> tuple[np.ndarray | None,
-                                                            float, float,
-                                                            np.ndarray | None]:
-        """-> (mask HxW bool | None, mask_area_fraction, score,
-        matched person_bbox xyxy | None). matched bbox is None when the
-        association failed — callers must not treat that mask as the
-        matched person's full-body mask (see decode)."""
-        h0, w0 = frame_rgb.shape[:2]
-        blob = preprocess(frame_rgb, self.resolution)
-        if self.backend_name == "ort":
-            outs = {
-                n: self.ort.sess.run(None, {self.ort.input_name: blob})[i]
-                for i, n in enumerate(("dets", "labels", "masks"))
-            }
-            names = {"dets": "dets", "labels": "labels", "masks": "masks"}
-        else:
-            torch = self._torch
-            t = torch.from_numpy(blob).to(self.engine.device)
-            raw = self.engine.run({self.engine.in_names[0]: t})
-            outs = {k: raw[n].float().cpu().numpy()
-                    for k, n in
-                    (("dets", self._names["dets"]),
-                     ("labels", self._names["labels"]),
-                     ("masks", self._names["masks"]))}
-            names = {"dets": "dets", "labels": "labels", "masks": "masks"}
-        return decode(outs, names, h0, w0, match_box)
-
-    def infer_boxes(self, frame_rgb: np.ndarray,
-                    boxes_xyxy: list[np.ndarray]) -> np.ndarray:
-        """Union mask of the person instances matching `boxes_xyxy` (HxW bool;
-        all-zero when nothing matches). One personseg pass per distinct box."""
-        h, w = frame_rgb.shape[:2]
-        union = np.zeros((h, w), dtype=bool)
-        for bx in boxes_xyxy:
-            mask, _, _, pbbox = self.infer(frame_rgb,
-                                           np.asarray(bx, np.float32))
-            # only masks whose person actually matched the box
-            if mask is not None and pbbox is not None:
-                union |= mask
-        return union
-
     def all_persons(self, frame_rgb: np.ndarray) -> np.ndarray | None:
         """-> union mask of every person instance, or None when the
-        segmenter finds nobody. VLM-sourced segments have no explicit-part
-        box to associate on, so every person present gets masked."""
+        segmenter finds nobody. Segments are VLM/crowd-sourced, so every
+        person present gets masked."""
         h0, w0 = frame_rgb.shape[:2]
         blob = preprocess(frame_rgb, self.resolution)
         if self.backend_name == "ort":
@@ -324,7 +215,7 @@ class PersonSegmenter:
             numpy = tensor.float().cpu().numpy()
             person_presence({"labels": numpy}, {"labels": name}, thr)
         Preprocess (CPU) happens here; only H2D + the engine run land on
-        the side stream, so the NudeNet engine's stream keeps flowing."""
+        the side stream, so the caller's main stream keeps flowing."""
         blob = preprocess(frame_rgb, self.resolution)
         torch = self._torch
         with torch.cuda.stream(stream):

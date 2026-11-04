@@ -1,46 +1,42 @@
-"""End-to-end pipeline smoke test (host, CPU, ORT backend, no torch).
-Generates a tiny synthetic clip and runs the full decode -> detect ->
-policy -> smoothing chain. Catches integration breakage (imports, decode
-wiring, result shape) that unit tests miss."""
+"""End-to-end pipeline smoke test (host, CPU, no weights needed).
+Generates a tiny synthetic clip and runs the full decode -> person-gate
+feed chain (gate/arbiter off — no engines). Catches integration breakage
+(imports, decode wiring, result shape) that unit tests miss."""
 
-import glob
 import subprocess
 import tempfile
-from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    not glob.glob("models/nudenet_320n_v1.onnx"),
-    reason="weights not present")
+
+def _clip(td, name="smoke.mp4", t="4"):
+    path = f"{td}/{name}"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=size=640x270:rate=24",
+         "-t", t, "-c:v", "libx264", "-pix_fmt", "yuv420p", path],
+        check=True)
+    return path
 
 
 def test_run_scan_end_to_end():
     from scanner.pipeline import run_scan
-    from scanner.policy import Policy
     from scanner.temporal import SmoothingConfig
 
     with tempfile.TemporaryDirectory() as td:
-        clip = f"{td}/smoke.mp4"
-        subprocess.run(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-             "-f", "lavfi", "-i", "testsrc2=size=640x270:rate=24",
-             "-t", "4", "-c:v", "libx264", "-pix_fmt", "yuv420p", clip],
-            check=True)
-        res = run_scan(clip, policy=Policy(), smoothing=SmoothingConfig(),
-                       sample_fps=2.0, model="320n", backend="ort")
+        clip = _clip(td)
+        res = run_scan(clip, smoothing=SmoothingConfig(), sample_fps=2.0)
 
     assert res["duration"] == pytest.approx(4.0, abs=0.2)
-    assert res["frames_scanned"] == pytest.approx(8, abs=2)
-    assert res["segments"] == []            # synthetic content: no triggers
+    assert res["segments"] == []            # synthetic content: no sources
+    # detector-era record fields, kept empty for consumer compatibility
     assert res["review_segments"] == []
-    assert res["timeline"] and all(b["hits"] == 0 for b in res["timeline"])
-    assert res["model"] == "320n" and res["backend"].startswith("ort")
+    assert res["timeline"] == [] and res["label_stats"] == {}
     assert res["wall_time_s"] > 0
-    # stage A on by default; stage B opt-in (absent unless requested)
-    assert res["tracking"]["enabled"] is True
-    assert res["tracking"]["bridged_samples"] == 0
+    # stage B opt-in (absent unless requested); gate follows the arbiter
     assert res["arbiter"] is None
+    assert res["person_gate"] == {"enabled": False, "reason": "disabled"}
+    assert res["stages"]["decode_gate_s"] > 0
 
 
 def test_run_scan_crowd_end_to_end(monkeypatch, tmp_path):
@@ -48,9 +44,10 @@ def test_run_scan_crowd_end_to_end(monkeypatch, tmp_path):
     ranges merged as first-class segments (fetch monkeypatched — host
     tests stay network-free). Guards the crowd wiring that a unit test
     on crowd.py alone cannot see."""
+    from pathlib import Path
+
     import scanner.crowd as crowd_mod
     from scanner.pipeline import run_scan
-    from scanner.policy import Policy
     from scanner.temporal import SmoothingConfig
 
     fixture = (Path(__file__).parent / "fixtures" /
@@ -60,14 +57,8 @@ def test_run_scan_crowd_end_to_end(monkeypatch, tmp_path):
     monkeypatch.setattr("scanner.config.CROWD_CACHE_DIR", str(tmp_path))
 
     with tempfile.TemporaryDirectory() as td:
-        clip = f"{td}/Ex.Machina.2015.smoke.mp4"
-        subprocess.run(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-             "-f", "lavfi", "-i", "testsrc2=size=640x270:rate=24",
-             "-t", "4", "-c:v", "libx264", "-pix_fmt", "yuv420p", clip],
-            check=True)
-        res = run_scan(clip, policy=Policy(), smoothing=SmoothingConfig(),
-                       sample_fps=2.0, model="320n", backend="ort",
+        clip = _clip(td, "Ex.Machina.2015.smoke.mp4")
+        res = run_scan(clip, smoothing=SmoothingConfig(), sample_fps=2.0,
                        crowd=True)
 
     cr = res["crowd"]
@@ -88,19 +79,11 @@ def test_open_decoder_double_enter_single_ffmpeg():
     import shutil
     import time
 
-    import cv2
-    import numpy as np
-
     if not shutil.which("ffmpeg"):
         pytest.skip("ffmpeg not present")
 
     with tempfile.TemporaryDirectory() as td:
-        clip = f"{td}/smoke.mp4"
-        subprocess.run(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-             "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24",
-             "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", clip],
-            check=True)
+        clip = _clip(td, t="2")
         from scanner.decode import FFmpegPipeDecoder
 
         dec = FFmpegPipeDecoder(clip, fps=4.0, width=320, height=180,
@@ -127,30 +110,3 @@ def test_open_decoder_double_enter_single_ffmpeg():
         while alive(first_pid) and time.monotonic() < deadline:
             time.sleep(0.1)
         assert not alive(first_pid)
-
-
-def test_cluster_weak_bursts_to_peaks():
-    from scanner.pipeline import _cluster_weak
-    raw = [(100.0, 0.30, "FEMALE_GENITALIA_EXPOSED"),
-           (100.25, 0.26, "FEMALE_GENITALIA_EXPOSED"),   # same burst
-           (101.9, 0.35, "FEMALE_GENITALIA_EXPOSED"),    # still <=2s gap
-           (110.0, 0.28, "BUTTOCKS_EXPOSED"),            # new burst
-           (400.0, 0.44, "BUTTOCKS_EXPOSED")]
-    peaks = _cluster_weak(raw, 10)
-    assert [(round(t, 2), s, l) for t, s, l in peaks] == [
-        (101.9, 0.35, "FEMALE_GENITALIA_EXPOSED"),
-        (110.0, 0.28, "BUTTOCKS_EXPOSED"),
-        (400.0, 0.44, "BUTTOCKS_EXPOSED")]
-    # cap by striding, not truncating
-    many = [(float(i), 0.3, "BUTTOCKS_EXPOSED") for i in range(0, 100, 5)]
-    assert len(_cluster_weak(many, 4)) == 4
-    assert _cluster_weak(many, 4)[0][0] == 0.0
-
-
-def test_orphan_flagged_excludes_segment_covered():
-    from scanner.pipeline import _orphan_flagged
-    ts = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5]
-    flags = [False, True, True, False, True, False]
-    segs = [{"start": 0.3, "end": 1.2}]      # padded over the first run
-    assert _orphan_flagged(ts, flags, segs) == [2.0]
-    assert _orphan_flagged(ts, flags, []) == [0.5, 1.0, 2.0]

@@ -2,11 +2,11 @@
 
 Endpoints:
   POST /scan       multipart `video` file OR `video_path` (volume-mounted),
-                   plus optional JSON form fields `policy`, `smoothing`,
-                   `sample_fps`, `model`, `backend`, arbiter fields, and
-                   crowd fields (`crowd`, `crowd_title`, `crowd_year` —
-                   CringeMDB scene-guide timestamps as first-class
-                   segments, fail-soft)
+                   plus optional JSON form fields `smoothing`,
+                   `sample_fps`, arbiter fields, and crowd fields
+                   (`crowd`, `crowd_title`, `crowd_year` — CringeMDB
+                   scene-guide timestamps as first-class segments,
+                   fail-soft)
   GET  /scan/{id}  status + result (segments in seconds)
   GET  /scans      list
   POST /mask       mask-precision mask render (stage C): segments from a
@@ -46,7 +46,6 @@ from .jobs import (chapters_store, mask_store, new_chapters_entry,
                    resolve_segments, run_chapters_job, run_mask_job,
                    run_scan_job, run_verify_job, safe_output_name,
                    scan_store, verify_store)
-from .pipeline import registry
 from .schemas import ScanResult
 
 logging.basicConfig(
@@ -79,13 +78,8 @@ async def submit_scan(
     background_tasks: BackgroundTasks,
     video: UploadFile | None = File(None, description="Video file"),
     video_path: str | None = Form(None, description="Path to a mounted video"),
-    policy: str | None = Form(None, description="JSON policy overrides"),
     smoothing: str | None = Form(None, description="JSON smoothing overrides"),
     sample_fps: float = Form(config.DEFAULT_SAMPLE_FPS),
-    model: str = Form(config.DEFAULT_MODEL),
-    backend: str = Form("trt"),
-    fp32: bool = Form(False),
-    track: bool = Form(config.DEFAULT_TRACK),
     arbiter: bool = Form(config.DEFAULT_ARBITER),
     arbiter_model: str = Form(config.DEFAULT_ARBITER_MODEL),
     arbiter_mode: str = Form(config.DEFAULT_ARBITER_MODE),
@@ -93,24 +87,16 @@ async def submit_scan(
     crowd_title: str | None = Form(None),
     crowd_year: int | None = Form(None),
     guide: bool = Form(config.DEFAULT_GUIDE),
-    detector: bool = Form(True,
-                          description="false = NudeNet-free scan: person "
-                                      "gate + arbiter sweep + crowd only"),
 ):
-    if model not in config.MODELS:
-        raise HTTPException(400, f"unknown model {model!r}")
     if not (0.2 <= sample_fps <= 12.0):
         raise HTTPException(400, "sample_fps must be in [0.2, 12]")
     if arbiter_mode not in config.ARBITER_MODES:
         raise HTTPException(400, f"arbiter_mode must be one of "
                                  f"{config.ARBITER_MODES}")
-    policy_overrides = _parse_json_field(policy, "policy")
     smoothing_overrides = _parse_json_field(smoothing, "smoothing")
     # validate early so bad config 400s instead of failing the job
-    from .policy import Policy
     from .temporal import SmoothingConfig
     try:
-        Policy.from_overrides(policy_overrides)
         SmoothingConfig.from_overrides(smoothing_overrides)
     except ValueError as e:
         raise HTTPException(400, str(e))
@@ -135,12 +121,11 @@ async def submit_scan(
         raise HTTPException(400, "provide multipart `video` or `video_path`")
 
     background_tasks.add_task(
-        run_scan_job, scan_id, source, policy_overrides, smoothing_overrides,
-        sample_fps, model, backend, fp32, workspace,
-        track=track, arbiter=arbiter, arbiter_model=arbiter_model,
+        run_scan_job, scan_id, source, smoothing_overrides,
+        sample_fps, workspace,
+        arbiter=arbiter, arbiter_model=arbiter_model,
         arbiter_mode=arbiter_mode, crowd=crowd, crowd_title=crowd_title,
-        crowd_year=crowd_year, guide=guide,
-        detector_enabled=detector)
+        crowd_year=crowd_year, guide=guide)
 
     return JSONResponse({
         "scan_id": scan_id,
@@ -172,21 +157,18 @@ async def submit_mask(
     segments: str | None = Form(None,
                                 description="JSON [[start, end], ...] seconds"),
     scan_id: str | None = Form(None,
-                               description="Take segments from this scan "
-                                           "(its policy is reused unless "
-                                           "overridden)"),
-    policy: str | None = Form(None, description="JSON policy overrides"),
+                               description="Take segments from this scan"),
     window_start: float | None = Form(None,
                                       description="Render only from here (s)"),
     window_end: float | None = Form(None,
                                     description="Render only until here (s)"),
     cq: int | None = Form(None, ge=1, le=51),
     output_name: str | None = Form(None,
-                                    description="Final filename in the "
-                                                "output dir (basename)"),
+                                   description="Final filename in the "
+                                               "output dir (basename)"),
     bake_chapters: bool = Form(True,
-                                description="Bake mask-region chapters "
-                                            "into the render (full movies)"),
+                               description="Bake mask-region chapters "
+                                           "into the render (full movies)"),
 ):
     if not Path(video_path).exists():
         raise HTTPException(400, f"video_path not found: {video_path}")
@@ -194,14 +176,8 @@ async def submit_mask(
         raise HTTPException(400, "window_start and window_end come together")
     if output_name is not None:
         output_name = _safe_output_name(output_name)
-    policy_overrides = _parse_json_field(policy, "policy")
     try:
         segs = resolve_segments(segments, scan_id)
-        if policy_overrides is None and scan_id is not None:
-            # consistency: mask with the same policy the scan was judged by
-            policy_overrides = scan_store[scan_id].get("policy")
-        from .policy import Policy
-        Policy.from_overrides(policy_overrides)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -209,7 +185,7 @@ async def submit_mask(
     window = ((window_start, window_end) if window_start is not None
               else None)
     background_tasks.add_task(
-        run_mask_job, mask_id, video_path, segs, policy_overrides,
+        run_mask_job, mask_id, video_path, segs,
         window, cq, output_name=output_name, bake_chapters=bake_chapters)
     return JSONResponse({
         "mask_id": mask_id,
@@ -365,17 +341,23 @@ def list_scans():
 @app.get("/health")
 def health():
     from .arbiter import resolve_vlm_path
-    from .detector import _trt_available
     from .trt import gpu_slug, trt_slug
     from . import vlm as vlm_supervisor
+    try:
+        import tensorrt  # noqa: F401
+        trt_available = True
+    except ImportError:
+        trt_available = False
     vlm_model = config.DEFAULT_ARBITER_MODEL
     vlm = resolve_vlm_path(vlm_model) if vlm_model else ""
     return {
         "gpu": gpu_slug(),
-        "tensorrt": trt_slug() if _trt_available() else "unavailable",
+        "tensorrt": trt_slug() if trt_available else "unavailable",
         "trt_cache_dir": str(config.TRT_CACHE_DIR),
-        "models": {name: Path(config.MODEL_DIR / fname).exists()
-                   for name, (fname, _) in config.MODELS.items()},
+        "models": {
+            "person_seg": Path(
+                config.MODEL_DIR / config.PERSON_SEG["onnx"]).exists(),
+        },
         "vlm": {
             "model": vlm_model or "(llama-server via ARBITER_BASE_URL)",
             "path": vlm,
@@ -384,8 +366,6 @@ def health():
             # must not spawn the ~20GB model (vlm.acquire does that)
             "server": vlm_supervisor.status(),
         },
-        "loaded_detectors": [f"{m}/{b}"
-                             for (m, b, _, _) in registry._detectors.keys()],
         "scan_workspaces": str(config.SCAN_WORKSPACE_DIR),
     }
 

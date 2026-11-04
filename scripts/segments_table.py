@@ -2,8 +2,9 @@
 """Blurred-sections table from a scan JSON.
 
 Rows: index, timecode in/out, duration, sources with labels, mean conf.
-Sources: detector (NudeNet class hits), arbiter (VLM explicit frames +
-labels from arbiter.frame_verdicts), crowd (cringemdb category).
+Sources: arbiter (VLM explicit frames + labels from
+arbiter.frame_verdicts), crowd (cringemdb category). Pre-2026-11-05
+records may still carry NudeNet detector labels (legacy decode branch).
 Usage: table.py SCAN.json [--json rows.json]
 """
 import json
@@ -54,14 +55,14 @@ for i, s in enumerate(segs):
         elif k.startswith("cringemdb:"):
             src.append(f"CringeMDB crowd: {k.split(':', 1)[1]}")
         else:
-            src.append(f"NudeNet: {k} ×{v}")
+            src.append(f"detector (legacy record): {k} ×{v}")
     if not src:
         v = seg_verdict(a, b)
         if v and v.get("valid_frames"):
-            src.append(f"detector flag only — arbiter {v['explicit_frames']}/"
+            src.append(f"arbiter {v['explicit_frames']}/"
                        f"{v['valid_frames']} frames explicit (kept: add-only)")
         else:
-            src.append("trusted (detector/crowd) — not re-judged by the VLM")
+            src.append("trusted (crowd) — not re-judged by the VLM")
     rows.append({
         "i": i, "in": tc(a), "out": tc(b), "dur": round(b - a, 1),
         "sources": src, "conf": round(s.get("mean_score", 0.0), 2),

@@ -1,8 +1,7 @@
-# Scanner image: NudeNet ONNX -> TensorRT FP16, weights baked in from
-# ghcr.io/darkstar1997/movietrimmer-nudenet-weights; RF-DETR Seg Medium from
-# ghcr.io/darkstar1997/movietrimmer-rfdetr-seg-weights. The VLM arbiter is
-# NOT bundled: it runs as a llama-server sidecar (Qwen3-VL-30B-A3B MoE)
-# reached over ARBITER_BASE_URL.
+# Scanner image: RF-DETR Seg Medium person segmenter/gate, weights baked
+# in from ghcr.io/darkstar1997/movietrimmer-rfdetr-seg-weights. The VLM
+# arbiter is NOT bundled: it runs as a llama-server sidecar
+# (Qwen3-VL-30B-A3B MoE) reached over ARBITER_BASE_URL.
 # NOTHING downloads at runtime: HF_HUB_OFFLINE=1 turns any accidental hub
 # access into a hard error. Engine cache is served by a bind mount.
 #
@@ -14,7 +13,6 @@
 # (independent-lifecycle hosts can still run scanner + sidecar separately)
 #
 # Base matches the visiontouch/fitness-coach stack (torch 2.14.0 / CUDA 13.0).
-FROM ghcr.io/darkstar1997/movietrimmer-nudenet-weights:v1 AS weights
 FROM ghcr.io/darkstar1997/movietrimmer-rfdetr-seg-weights:v1 AS seg-weights
 
 FROM pytorch/pytorch:2.14.0-cuda13.0-cudnn9-runtime
@@ -69,8 +67,6 @@ RUN pip install --no-cache-dir PyNvVideoCodec==2.2.3
 # arbiter ships in the sidecar image, not here — ARBITER_BASE_URL points
 # at it (docker-compose.yml); an unset base URL falls back to in-process
 # transformers IF weights are mounted into VLM_DIR (none bundled).
-COPY --from=weights /models/nudenet_320n_v1.onnx /opt/models/
-COPY --from=weights /models/nudenet_640m_v1.onnx /opt/models/
 COPY --from=seg-weights /models/person_seg_rfdetr_seg_medium_v1.onnx /opt/models/
 
 COPY scanner/ /app/scanner/

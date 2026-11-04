@@ -3,9 +3,9 @@
 The VLM sweep exists for content only a vision LLM catches (dim, distant,
 color-graded) — but a frame with no person in it cannot host that content.
 This stage answers "is anybody here" at PERSON_GATE_FPS, piggybacked on
-the detector's existing decode stream (no second decode pass), on its own
-CUDA stream so the RF-DETR engine overlaps the NudeNet engine instead of
-serializing behind it, then smooths per-sample answers into person_ranges
+the scan's existing decode stream (no second decode pass), on its own
+CUDA stream so the gate engine overlaps decode instead of serializing
+behind it, then smooths per-sample answers into person_ranges
 the arbiter planner intersects its sweep with.
 
 Failure policy: FAIL-OPEN. If the engine cannot init or the pass dies
@@ -81,11 +81,11 @@ def smooth_person_presence(times: list[float], present: list[bool], *,
 
 
 class PersonGateRunner:
-    """Fed batches by the scan loop (same frames NudeNet sees, strided to
+    """Fed batches by the scan loop (the decode samples, strided to
     PERSON_GATE_FPS); finish() returns smoothed ranges + stats.
 
     TRT path enqueues per frame on a side stream and joins per batch, so
-    the gate engine and the NudeNet engine overlap. ORT path (host tests)
+    the gate engine overlaps decode. ORT path (host tests)
     is synchronous. Any exception fails the gate open (ranges=None)."""
 
     def __init__(self, backend: str = "trt"):
