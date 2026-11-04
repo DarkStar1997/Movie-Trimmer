@@ -2,24 +2,27 @@
 
 GPU-native NSFW auto-detection and masking for movies: a FastAPI service that
 scans a film for explicit content, then renders a copy in which every flagged
-moment is masked with **person-shaped masks** — no cuts, no timeline drift,
-audio and subtitles bit-exact. It began as a movie trimmer / subtitle merger
-(`main.py`, still here) and grew the scanner (`scanner/`) into the main event.
+moment is masked with **solid-black person-shaped masks** — no cuts, no
+timeline drift, audio and subtitles bit-exact. It began as a movie trimmer /
+subtitle merger (`main.py`, still here) and grew the scanner (`scanner/`) into
+the main event.
 
-The whole pipeline — detector, person gate, VLM arbiter, community
-timestamps, GPU mask render — runs in **one container** on one GPU.
+The whole pipeline — person gate, VLM arbiter, community timestamps, GPU mask
+render — runs in **one container** on one GPU. There is no image detector:
+discovery is VLM-first (Qwen3-VL judging a sparse, person-gated plan),
+validated across three full movies (see `scans/VLM_RUNS.md`).
 
 ![pipeline](docs/pipeline.svg)
 
-Design principle throughout: **add-only**. Detector, crowd and VLM can each
+Design principle throughout: **add-only**. Crowd and VLM findings can each
 only add territory; nothing can shrink or remove a flagged range, so
 re-scanning can never reduce coverage.
 
 ## Quick start
 
-Prereqs: an NVIDIA GPU (24 GB for the VLM arbiter; scans without the arbiter
-fit in ~4 GB), the NVIDIA container toolkit, and ffmpeg/ffprobe on the host
-(verification only).
+Prereqs: an NVIDIA GPU (24 GB for the full pipeline with the VLM arbiter;
+renders without the arbiter fit in ~4 GB), the NVIDIA container toolkit, and
+ffmpeg/ffprobe on the host (verification only).
 
 ```bash
 # put the movie anywhere in the repo (mounted read-only at /movies)
@@ -37,41 +40,41 @@ mask outputs). It also removes any foreign container squatting port 8081
 ## Scanning
 
 ```bash
-# detector-only (fast, no VLM): NudeNet + tracking + smoothing
-curl -X POST http://localhost:8081/scan -F video_path=/movies/film.mkv
-
-# full stack: + person-gated VLM arbiter + CringeMDB crowd timestamps
+# full scan: person-gated VLM arbiter + CringeMDB crowd timestamps
 curl -X POST http://localhost:8081/scan \
   -F video_path=/movies/film.mkv -F arbiter=true -F crowd=true
+
+# + IMDb parents-guide context for the arbiter's tie-break step (opt-in)
+curl -X POST http://localhost:8081/scan \
+  -F video_path=/movies/film.mkv -F arbiter=true -F crowd=true -F guide=true
 
 curl http://localhost:8081/scan/{scan_id}    # 202-async → status + segments
 ```
 
 Each request returns immediately; poll `GET /scan/{scan_id}` until
 `completed`. The result JSON carries the segment list (seconds, `labels`
-naming the source: NudeNet class / `arbiter` / `cringemdb:<category>`),
-per-frame arbiter verdicts, crowd bookkeeping, and timings.
+naming the source: `arbiter` / `cringemdb:<category>`), per-frame arbiter
+verdicts, crowd bookkeeping, per-stage timings, and the person-gate ranges.
 
 **How the sources combine:**
 
-- **Detector (NudeNet 640m, TRT fp16)** — the always-on backbone:
-  **39–54× realtime** (a 2-hour film ≈ 3 min; ~935 fps sustained decode,
-  every frame decoded, 1-in-6 kept at 0.25 s sampling); weak sub-threshold
-  flicker is bridged by a person-cluster tracker.
-- **Person gate (RF-DETR Seg Medium, TRT fp32)** — presence pass riding
-  the same decode at zero extra decode cost (0.5 s resolution); computes
-  ranges where a person is on screen. The arbiter only spends frames
-  there: an empty hallway cannot host explicit content. Gate recall is
-  audited, not assumed (78/78 explicit hits covered on the calibration
-  movie).
+- **Person gate (RF-DETR Seg Medium, TRT fp32)** — presence pass riding the
+  scan's decode at zero extra decode cost (0.5 s resolution, own CUDA
+  stream); computes ranges where a person is on screen. The arbiter only
+  spends frames there: an empty hallway cannot host explicit content. Gate
+  recall is audited, not assumed (78/78 explicit hits covered on the
+  calibration movie). Fail-open: a gate failure means a full sweep — VLM
+  time, never coverage.
 - **VLM arbiter (Qwen3-VL-30B-A3B via llama-server)** — judges sparse,
-  curated frames: a person-gated global sweep (every 10 s), dense 1 s-spaced
-  windows hugging every trusted segment's edges (10 s before / 45 s after —
-  scene spill lives there), and ±10 s ungated expansion around new hits.
+  curated frames (~2% of the movie): a person-gated global sweep (every
+  5 s), dense 1 s-spaced windows hugging every trusted segment's edges
+  (10 s before / 45 s after — scene spill lives there), and a ±10 s
+  expansion pass re-measuring each sweep hit's neighborhood at 1 s density.
   Explicit findings become new segments; existing ones are never re-judged.
   The server is **on-demand**: spawned when arbiter work starts (~20 GB,
-  6–8 s warm / minutes cold), stopped when it ends — idle VRAM use is zero.
-  Bring-up failure is loud (error block in the result JSON), never silent.
+  seconds warm / minutes cold), stopped when it ends — idle VRAM use is
+  zero. Bring-up failure is loud (error block in the result JSON), never
+  silent.
 - **Crowd (CringeMDB scene guides)** — community timestamp ranges for
   nudity/sex categories, cached on disk, fail-soft (site down → scan
   proceeds). Entries are padded and treated as trusted territory.
@@ -86,8 +89,8 @@ curl -X POST http://localhost:8081/mask \
   -F output_name=Film.2023.masked.mp4
 
 # from explicit segments — send FULL segment dicts, not bare pairs:
-# labels are load-bearing ('arbiter'/'cringemdb' segments get the
-# mask-every-person path; bare pairs lose them and render unmasked)
+# labels carry the overlay text and the crowd category, and gate the
+# full-frame failsafe when the segmenter finds nobody
 curl -X POST http://localhost:8081/mask \
   -F video_path=/movies/film.mkv \
   -F 'segments=[{"start": 42.0, "end": 58.0, "labels": {"arbiter": 1}}]'
@@ -100,12 +103,16 @@ curl -X POST http://localhost:8081/mask -F video_path=/movies/film.mkv \
 curl http://localhost:8081/mask/{mask_id}    # → output path in mask_outputs/
 ```
 
-Full renders are one continuous GPU-native pass: NVDEC → zero-copy torch →
-RF-DETR person-mask pixelation on the GPU → NVENC (hevc). Frames never touch
-the CPU; audio and subtitles pass through bit-exact — frame and packet counts
-match the source exactly. Masks are segmented per frame at the source's
-native fps (`MASK_KEYFRAME_FPS=0`; a fixed economy rate can be set). Every
-flagged frame also carries a red overlay
+Every person the segmenter finds inside a flagged range is masked whole
+(solid black, temporally smoothed so silhouettes don't flicker; a centered
+rectangle catches extreme close-ups where nobody is detectable). Masks are
+segmented per frame at the source's native fps (`MASK_KEYFRAME_FPS=0`; a
+fixed economy rate can be set). Full renders are one continuous GPU-native
+pass — NVDEC → zero-copy torch → NVENC (hevc, p5) — with the analysis
+overlapped on the encode: each segment's masks stream to the render head
+the moment they are final. Frames never touch the CPU; audio and subtitles
+pass through bit-exact — frame and packet counts match the source exactly.
+Every flagged frame also carries a red overlay
 (`VULGARITY DETECTED / <conf>% <label>`); `MASK_OVERLAY=0` disables it.
 
 ## Chapters
@@ -130,8 +137,8 @@ without trusting the pipeline: container/duration sanity, full decode with
 (bit-exact), mask **presence** inside flagged segments (hot-pixel diff +
 blackout + texture crushing against the nearest source frames, matched by
 raw PTS), and mask **absence** in clean gaps. Spots are auto-derived from
-segment provenance (detector / crowd / arbiter + evenly-spread clean
-times) unless given explicitly:
+segment provenance (crowd / arbiter + evenly-spread clean times) unless
+given explicitly:
 
 ```bash
 curl -X POST http://localhost:8081/verify \
@@ -142,27 +149,32 @@ curl http://localhost:8081/verify/{verify_id}   # → checks[], all_pass
 
 ## Validated end-to-end
 
-Two full movies, no manual intervention between phases, judged by the gate:
+Three full movies, no manual intervention between phases, judged by the
+gate (detector-free pipeline throughout; records in `scans/VLM_RUNS.md`):
 
-| | Gone Girl (2014) | Saltburn (2023) |
-|---|---|---|
-| runtime / frames | 8942 s · 214,355 | 7906 s · 189,741 |
-| segments found | 38 | 76 |
-| flagged time | 701 s (7.8 %) | 1747 s (22.1 %) |
-| frames masked | 15,612 | 39,827 |
-| VLM new / edge-ext / merged | 16 / 5 / 2 | 11 / 31 / 7 |
-| scan → mask → verify | 882 / 507 / ~300 s | 1351 / 540 / 157 s |
-| throughput | decode ~935 fps · render 423 fps · arbiter 81–85 % of scan wall | |
-| verify gate | 24/24 PASS | 37/37 PASS |
+| | Gone Girl (2014) | Saltburn (2023) | Wolf of Wall Street (2013) |
+|---|---|---|---|
+| segments (arbiter + crowd) | 21 (17 + 4) | 33 (22 + 11) | 31 (22 + 9) |
+| flagged time | 709 s (7.9%) | 1,686 s (21.3%) | 1,780 s |
+| frames masked | 16,997 | 40,497 | 42,675 |
+| verify gate | 11/11 PASS | 11/11 PASS | 10/10 PASS |
 
-Saltburn end-to-end: **34.3 min** for a 131-minute film. Source codecs
-covered: hevc 10-bit 16:9 and h264 8-bit 4:3.
+Throughput (GG, 2.5 h film): the 2026-11 throughput pass took scans
+1,274 → 796 s (**1.60×**, arbiter frame extraction fixed) and renders
+~700 → 586 s (**−16%**, analysis overlapped on the encode); scan + render
+**−30%**. Post-NudeNet-strip confirmation on the same film: scan 821 s,
+render 588 s, verify 11/11, mask pixel counts identical to baseline
+(`scans/THROUGHPUT.md`). Remaining floors: VLM judging (~0.3 s/frame
+across 4 slots) and NVENC encode (~450 fps) — the levers over them are
+quality decisions, not engineering ones.
+
+Source codecs covered: hevc 10-bit 16:9 and h264 8-bit 4:3.
 
 ## API summary
 
 | endpoint | purpose |
 |---|---|
-| `POST /scan` | async scan (form: `video_path`, `arbiter`, `crowd`, `guide`, `arbiter_mode=apply\|verify`, `sample_fps`, `policy`, `smoothing`, `track`, …) |
+| `POST /scan` | async scan (form: `video_path`, `arbiter`, `arbiter_mode=apply\|verify`, `arbiter_model`, `crowd` + `crowd_title`/`crowd_year`, `guide`, `sample_fps`, `smoothing`) |
 | `GET /scan/{id}` | status + result JSON |
 | `POST /mask` | async render (form: `video_path`, `scan_id` or `segments`, `cq`, `window_start/end`, `output_name`, `bake_chapters`) — solid-black person masks + chapters |
 | `GET /mask/{id}` | status → `output` path, render stats, chapters |
@@ -170,7 +182,7 @@ covered: hevc 10-bit 16:9 and h264 8-bit 4:3.
 | `GET /verify/{id}` | status → `checks[]`, `all_pass` |
 | `POST /chapters` | bake mask chapters into a render in place (`output_path` or `mask_id`, + `segments`/`scan_id`) |
 | `GET /scans`, `GET /masks`, `GET /verifies` | lists |
-| `GET /health` | GPU/TRT state, models, on-demand VLM server state |
+| `GET /health` | GPU/TRT state, model presence, on-demand VLM server state |
 
 ## Configuration
 
@@ -179,27 +191,30 @@ Key env knobs (all have sane defaults; see `scanner/config.py`):
 | env | default | meaning |
 |---|---|---|
 | `PERSON_GATE_ENABLED` | 1 | RF-DETR gate for the arbiter sweep |
-| `ARBITER_SWEEP_EVERY_S` | 10 | global sweep spacing (person-gated) |
+| `ARBITER_SWEEP_EVERY_S` | 5 | global sweep spacing (person-gated) |
 | `ARBITER_MAX_FRAMES` | 0 | arbiter frame cap (0 = uncapped) |
-| `ARBITER_SWEEP_PAD_S` | 10 | pad around sweep/weak hits |
-| `ARBITER_EXPAND_MAX_FRAMES` | 96 | expansion budget around new hits |
+| `ARBITER_SWEEP_PAD_S` | 10 | pad around explicit sweep hits |
+| `ARBITER_EXPAND_MAX_FRAMES` | 192 | expansion budget around new hits |
+| `ARBITER_HTTP_CONCURRENCY` | 4 | concurrent VLM requests (match llama-server slots) |
+| `ARBITER_SELECT_MIN` | 400 | ≥ this many frames → one select-pass extraction, else per-seek |
 | `CROWD_CATEGORIES` | nudity,sex | in-scope crowd categories |
 | `CROWD_PAD_S` | 1.5 | padding around crowd ranges |
 | `GUIDE_CACHE_DIR` | scans/guide_cache | parents-guide context cache (guide=true; IMDb blocks live fetches, so guides are seeded here browser-assisted) |
 | `VLM_START_TIMEOUT_S` | 900 | llama-server bring-up budget |
 | `MASK_KEYFRAME_FPS` | 0 | mask analysis rate; 0 = every frame at native fps (capped 30) |
+| `MASK_OVERLAP` | 1 | overlap mask analysis on the encode (full renders) |
 | `MASK_OVERLAY` | 1 | red warning overlay on flagged frames |
 | `DEFAULT_ARBITER_MODE` | apply | `verify` reports verdicts, changes nothing |
 
 ## Repo layout
 
 ```
-scanner/          the NSFW pipeline (decode, detector, person gate, arbiter,
-                  crowd, mask, API) — packaged into the images
+scanner/          the NSFW pipeline (decode, person gate, arbiter,
+                  crowd, mask, verify, API) — packaged into the images
 scripts/          segments_table.py, person_probe.py, eval_gt.py, eval/
                   (prompt-replay harness — dev-time, host-side)
 docker/           entrypoints for the scanner / all-in-one images
-tests/            137 CPU-only tests: pytest tests/ -q
+tests/            110 CPU-only tests: pytest tests/ -q
 run.py            run the appliance (docker run --rm, port hygiene)
 build.py          build + push all images
 docker-compose.yml  alternative launch (same container, restart: unless-stopped)
@@ -212,7 +227,6 @@ Models are baked into versioned weight images (nothing downloads at run
 time; `HF_HUB_OFFLINE=1` makes accidental hub access a hard error):
 
 ```
-ghcr.io/darkstar1997/movietrimmer-nudenet-weights:v1      NudeNet 320n + 640m
 ghcr.io/darkstar1997/movietrimmer-rfdetr-seg-weights:v1   RF-DETR Seg Medium
 ghcr.io/darkstar1997/movie-trimmer-vlm-qwen3vl-30b-a3b:v1 Qwen3-VL-30B GGUF
 ghcr.io/darkstar1997/movie-trimmer-scanner:v1             scanner (stages A–C)
