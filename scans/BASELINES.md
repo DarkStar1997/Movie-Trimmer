@@ -63,3 +63,7 @@ folded into the encode (chapters written at mux time) if it matters.
   merges accumulate labels, so segment 0 satisfies every provenance
   class. Gate still verified 79%-black 544k-px mask presence + 3 clean
   spots. Improvement candidate: pick per-class segments by top label.
+- **Adjudicated after the guide A/B (see GUIDE_AB_RESULTS.md §4)**:
+  these v3 baselines contain ~215 s of confirmed over-masking (10
+  pure-arbiter sweep ranges across the three movies). They remain the
+  reference records, but are not frame-accurate ground truth.

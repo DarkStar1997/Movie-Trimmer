@@ -52,39 +52,34 @@ frame counts are not comparable (see BASELINES.md note).
 Guide context costs ~nothing at scan time (cache read + one suggestion
 call; wall times within run-to-run noise).
 
-## 4. Mask-coverage changes — YOUR ADJUDICATION LIST
+## 4. Mask-coverage changes — ADJUDICATED 2026-11-04: ALL LEAVE-CLEAN
 
-Ranges whose masking actually changed (>50%-cover diff of final segment
-sets). Review frames: `scans/review/{movie}_{start}_{LOST|NEW}_f*.jpg`
-(3 frames per range from the source).
+The user reviewed every changed range (frames in `scans/review/`,
+3 per range): verdict **leave clean on all 11**. That flips the
+reading — every range the guide unmasks was a **v3 false positive**,
+and the guide's own additions are its only errors.
 
-**GG — v3 masked, guide does not (FN risk on validated content):**
+**v3 FPs confirmed** (masked in the shipped baselines, should be clean)
+— all pure-arbiter sweep-window ranges, no detector/crowd backing:
 
-| range | len | notes |
+| movie | ranges | total |
 |---|---|---|
-| 1275–1295 | 20 s | guide keeps only 1285–1288 |
-| 1930–1950 | 20 s | |
-| 4115–4135 | 20 s | |
-| 7155–7195 | 40 s | biggest single loss in the A/B |
-| 8350–8370 | 20 s | |
+| GG | 1275–1295, 1930–1950, 4115–4135, 7155–7195 (40 s), 8350–8370 | 120 s |
+| SB | 950–970, 5752.8–5795, 3620.5–3623.5, 6700–6725 (= fp4 rejection) | 90 s |
+| Wolf | 4045.2–4050.2 | 5 s |
 
-**GG — guide masks, v3 does not (new catch or FP):** 1435–1455 (20 s).
+**~215 s of v3 over-masking total.** The "validated" baselines were
+gate-validated, not frame-adjudicated — the fp4 class was larger than
+the four SB ranges originally identified.
 
-**SB:**
+**Guide FPs confirmed** (masked only in guide runs, should be clean):
+GG 1435–1455 (20 s); SB 3643.5–3646.5 (3 s) + 5760–5780 (20 s remnant
+of the rejected range). **~43 s total.**
 
-| range | len | change | notes |
-|---|---|---|---|
-| 6700–6725 | 25 s | v3 → gone | **WIN: this is your rejected fp4 range 6705–6725** |
-| 950–970 | 20 s | v3 → gone | you accepted this content in review — FN risk |
-| 5752.8–5795 | 42 s | v3 → partial (5760–5780 kept) | net ~19 s unmasked |
-| 3620.5–3623.5 | 3 s | v3 → gone | 3643.5–3646.5 appears nearby |
-| 3643.5–3646.5 | 3 s | new | |
-
-fp4 scorecard: 2652–2665 was already clean in v3; **6705–6725 fixed by
-guide**; 4545–4565 and 7215–7235 still flagged by both.
-
-**Wolf:** 4045.2–4050.2 (5 s) unmasked. Otherwise neutral — despite the
-longest guide context, Wolf's arbiter barely moved.
+Still open from the original fp4 rejection: **SB 4545–4565 and
+7215–7237 remain flagged by BOTH runs** — user-rejected content that
+neither prompt version catches; the corrected finals drop them
+explicitly.
 
 ## 5. Gates + artifacts
 
@@ -98,15 +93,30 @@ Outputs: `mask_outputs/{Gone.Girl.2014,Saltburn.2023,Wolf.of.Wall.Street.2013}.m
 Records: `scans/{gone_girl,saltburn,wolf}_mask_guide.json`
 Comparison tool: `scripts/eval/guide_ab_report.py`
 
-## 6. Recommendation
+## 6. Verdict (post-adjudication) — flipped
 
-**Keep guide opt-in (`guide=true`), default off — v3 remains the shipping
-configuration.** The replay shows the mechanism violates its STEP-1-
-safety constraint and adds clean-space FPs; the pipeline shows real loss
-of validated GG/SB content (up to 40 s per range) against one genuine
-win (your rejected 6700–6725) and near-neutral Wolf behavior. The
-arbiter's STEP-2 context call remains the weakest joint, but parents-
-guide text is not a safe lever for it in this model's hands.
+The adjudication reverses §2's practical pessimism while confirming its
+mechanism finding:
 
-If the adjudicated verdicts in §4 come back mostly "guide was right",
-revisit with a stricter block (e.g. severity only, no scene items).
+- **v3's arbiter over-masks borderline sweep ranges**: ~215 s across
+  the three baselines was adjudicated clean (10 pure-arbiter ranges,
+  no detector/crowd backing — that class is the FP pattern).
+- **Guide context fixed all 10** and added ~43 s of its own FPs
+  (3 ranges). Net on changed ranges: 215 s of wrong masking removed
+  vs 43 s added.
+- The replay findings stand (STEP-1 leakage, +2 clean-space FPs) — the
+  mechanism is real, but on these three severe-rated guides its net
+  direction matched the user's judgment.
+
+Disposition:
+
+- **Corrected finals**: GG/SB re-rendered from the guide segment sets
+  minus the adjudicated FP ranges (+ the two still-flagged fp4 ranges
+  on SB); Wolf's guide output already matches the adjudication as-is.
+- **guide=true stays opt-in** until validated on a movie with a
+  Mild/None-rated guide — the leakage risk is untested in the
+  under-tagging direction, which is where it would bite.
+- Follow-up candidate: offline pass over recorded verdicts for an
+  arbiter new-segment evidence threshold — pure-arbiter sweep ranges
+  without detector backing were 100% of the confirmed FPs; no
+  detector-backed range was ever wrongly masked.
