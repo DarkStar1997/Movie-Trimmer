@@ -91,6 +91,7 @@ def run_scan(
     fp32: bool = False,
     batch_size: int = config.DEFAULT_BATCH_SIZE,
     track: bool = config.DEFAULT_TRACK,
+    detector_enabled: bool = True,
     arbiter: bool = config.DEFAULT_ARBITER,
     arbiter_model: str = config.DEFAULT_ARBITER_MODEL,
     arbiter_mode: str = config.DEFAULT_ARBITER_MODE,
@@ -99,9 +100,16 @@ def run_scan(
     crowd_year: int | None = None,
     guide: bool = config.DEFAULT_GUIDE,
 ) -> dict:
-    """Scan one video; returns the result dict (see schemas.ScanResult)."""
-    detector = registry.get(model or config.DEFAULT_MODEL, backend,
-                            batch_size, fp32)
+    """Scan one video; returns the result dict (see schemas.ScanResult).
+
+    detector_enabled=False is the NudeNet-free mode: stage A reduces to
+    the RF-DETR person gate (which feeds the arbiter's sweep ranges) and
+    discovery is the arbiter sweep + windows, plus crowd. The detector
+    timeline, tracking/bridging, weak/companion leads and fail-safe
+    re-detection all disappear with the detector."""
+    detector = (registry.get(model or config.DEFAULT_MODEL, backend,
+                             batch_size, fp32)
+                if detector_enabled else None)
     duration = probe_duration(video_path)
     src_w, src_h = probe_dimensions(video_path)
     aw, ah = analysis_size(src_w, src_h, config.DECODE_WIDTH)
@@ -134,7 +142,8 @@ def run_scan(
         dt=1.0 / sample_fps,
         max_lost_samples=config.TRACK_MAX_LOST_SAMPLES,
         explicit_hold_s=config.TRACK_EXPLICIT_HOLD_S,
-        refresh_floor=config.TRACK_REFRESH_FLOOR) if track else None
+        refresh_floor=config.TRACK_REFRESH_FLOOR
+    ) if (track and detector is not None) else None
     explicit_labels = set(policy.triggers)
 
     decoder, eff_fps = open_decoder(
@@ -143,7 +152,8 @@ def run_scan(
         bridge.dt = 1.0 / eff_fps
     logger.info("[scan] %s: %.1fs @ %.2ffps effective, %dx%d (%.2f:1), "
                 "backend=%s, track=%s", video_path, duration, eff_fps, aw, ah,
-                aw / ah, detector.backend_name, track)
+                aw / ah, detector.backend_name if detector else "gate-only",
+                track)
     gate_stride = max(1, round(eff_fps / max(config.PERSON_GATE_FPS, 0.1))) \
         if gate_runner is not None else 1
 
@@ -151,12 +161,14 @@ def run_scan(
 
     def flush(frames: list[np.ndarray], first_idx: int) -> None:
         nonlocal infer_s
-        t_infer = time.monotonic()
-        results = detector.detect_frames(frames)
-        infer_s += time.monotonic() - t_infer
         if gate_runner is not None:
             gate_runner.feed_batch(frames, first_idx, eff_fps, gate_stride)
             gate_runner.sync()
+        if detector is None:                     # NudeNet-free: gate only
+            return
+        t_infer = time.monotonic()
+        results = detector.detect_frames(frames)
+        infer_s += time.monotonic() - t_infer
         for j, dets in enumerate(results):
             idx = first_idx + j
             t = idx / eff_fps
@@ -208,31 +220,35 @@ def run_scan(
     finally:
         decoder.close()
 
-    segments = smooth_segments(trig_flags, ts, trig_scores, duration, smoothing)
-    review_segments = smooth_segments(rev_flags, ts, rev_scores, duration,
-                                      smoothing)
+    if detector is None:
+        segments, review_segments, timeline = [], [], []
+    else:
+        segments = smooth_segments(trig_flags, ts, trig_scores, duration,
+                                   smoothing)
+        review_segments = smooth_segments(rev_flags, ts, rev_scores, duration,
+                                          smoothing)
 
-    def _annotate(segs: list[dict], label_dicts: list[dict]) -> None:
-        """Attach per-segment label counts (sample hits per label inside the
-        segment window) for review UIs."""
-        for seg in segs:
-            counts: dict[str, int] = {}
-            for t, ld in zip(ts, label_dicts):
-                if ld and seg["start"] <= t <= seg["end"]:
-                    for lab in ld:
-                        counts[lab] = counts.get(lab, 0) + 1
-            seg["labels"] = dict(sorted(counts.items(),
-                                        key=lambda kv: -kv[1]))
+        def _annotate(segs: list[dict], label_dicts: list[dict]) -> None:
+            """Attach per-segment label counts (sample hits per label inside the
+            segment window) for review UIs."""
+            for seg in segs:
+                counts: dict[str, int] = {}
+                for t, ld in zip(ts, label_dicts):
+                    if ld and seg["start"] <= t <= seg["end"]:
+                        for lab in ld:
+                            counts[lab] = counts.get(lab, 0) + 1
+                seg["labels"] = dict(sorted(counts.items(),
+                                            key=lambda kv: -kv[1]))
 
-    _annotate(segments, trig_labels)
-    _annotate(review_segments, rev_labels)
-    for seg in segments:
-        seg["bridged_samples"] = sum(
-            1 for t, bo in zip(ts, bridge_only)
-            if bo and seg["start"] <= t <= seg["end"])
-    segments, review_segments = demote_bridge_only(segments,
-                                                   review_segments)
-    timeline = bin_timeline(trig_flags, ts, duration)
+        _annotate(segments, trig_labels)
+        _annotate(review_segments, rev_labels)
+        for seg in segments:
+            seg["bridged_samples"] = sum(
+                1 for t, bo in zip(ts, bridge_only)
+                if bo and seg["start"] <= t <= seg["end"])
+        segments, review_segments = demote_bridge_only(segments,
+                                                       review_segments)
+        timeline = bin_timeline(trig_flags, ts, duration)
 
     # person gate: join the side stream and smooth presence into ranges
     # (fail-open: runner errors return None ranges = whole timeline)
@@ -307,8 +323,9 @@ def run_scan(
 
     return {
         "duration": round(duration, 3),
-        "model": detector.model_name,
-        "backend": detector.backend_name,
+        "model": detector.model_name if detector else "none",
+        "backend": detector.backend_name if detector else "disabled",
+        "detector_enabled": detector_enabled,
         "sample_fps": eff_fps,
         "frames_scanned": len(ts),
         "segments": segments,
@@ -327,13 +344,14 @@ def run_scan(
                       "drop_rescue_score": smoothing.drop_rescue_score,
                       "pad_s": smoothing.pad_s},
         "tracking": {
-            "enabled": track,
+            "enabled": bool(track and detector),
             "explicit_hold_s": config.TRACK_EXPLICIT_HOLD_S,
             "refresh_floor": config.TRACK_REFRESH_FLOOR,
             "bridged_samples": bridged_total,
             "segments_with_bridging": sum(
                 1 for s in segments if s.get("bridged_samples")),
-        } if track else {"enabled": False, "bridged_samples": 0},
+        } if (track and detector) else {"enabled": False,
+                                        "bridged_samples": 0},
         "arbiter": arbiter_block,
         "person_gate": gate_stats,
         "crowd": crowd_block,

@@ -390,7 +390,8 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
         track_state: dict = {}
 
         def flush(frames, first_idx):
-            results = detector.detect_frames(frames)
+            results = (detector.detect_frames(frames) if detector is not None
+                       else [()] * len(frames))
             masks = keyframe_masks_for(results, frames, policy, segmenter,
                                        dilate_px, vlm_source=vlm,
                                        vlm_score=vlm_score,
@@ -597,7 +598,15 @@ def run_mask(video_path: str, segments: list[dict], out_path: str, *,
     from .decode import analysis_size
     aw, ah = analysis_size(w, h, config.DECODE_WIDTH)
 
-    detector = NudeNetDetector(backend=backend)
+    # NudeNet is only needed to re-detect boxes for detector-sourced
+    # segments; arbiter/crowd (VLM-source) segments mask via the person
+    # segmenter alone, so NudeNet-free scans never load it
+    def _vlm_sourced(s: dict) -> bool:
+        labs = s.get("labels") or {}
+        return ("arbiter" in labs
+                or any(str(k).startswith("cringemdb") for k in labs))
+    detector = (NudeNetDetector(backend=backend)
+                if any(not _vlm_sourced(s) for s in segments) else None)
     segmenter = PersonSegmenter(backend="trt" if backend != "ort" else "ort")
     per_seg = analysis_pass(video_path, segments, policy, detector,
                             segmenter, aw, ah)
