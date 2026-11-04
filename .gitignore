@@ -219,6 +219,7 @@ scans/*
 !scans/REPLAY_AB.md
 !scans/GUIDE_AB_RESULTS.md
 !scans/VLM_RUNS.md
+!scans/SAM3_MASK_TIMING.md
 !scans/guide_cache/
 .replay/
 mask_outputs/
