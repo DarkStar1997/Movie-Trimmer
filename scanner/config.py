@@ -296,6 +296,13 @@ ARBITER_HTTP_CONCURRENCY = int(
     os.environ.get("ARBITER_HTTP_CONCURRENCY", "4"))
 ARBITER_HTTP_TIMEOUT_S = float(
     os.environ.get("ARBITER_HTTP_TIMEOUT_S", "120"))
+# Extraction routing: batches of at least this many frames take the
+# one-pass select route (costs a full-movie decode, ~126s on GG);
+# smaller batches per-seek (~0.2s/frame). Break-even ~600; 400 biases
+# toward the seek path, which also degrades gracefully if the select
+# chain ever fails to initialize.
+ARBITER_SELECT_MIN = int(
+    os.environ.get("ARBITER_SELECT_MIN", "400"))
 # On-demand VLM (scanner/vlm.py): llama-server spawns when arbiter work
 # starts and stops when it ends — the ~20GB stays free between jobs.
 VLM_START_TIMEOUT_S = float(os.environ.get("VLM_START_TIMEOUT_S", "900"))

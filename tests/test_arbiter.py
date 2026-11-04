@@ -446,3 +446,65 @@ def test_http_response_text_variants():
     assert http_response_text({"choices": []}) == ""
     assert http_response_text({}) == ""
     assert http_response_text(None) == ""
+
+
+def test_snap_times_ms_quantized_grid():
+    """Sample-grid times land on actual frame PTS after ms-timebase
+    quantization: everything snaps, nothing falls back. Input order is
+    DECODE order (ffprobe emits B-frame packets unsorted) — snapping
+    must not care."""
+    import random
+
+    from scanner.arbiter import _snap_times
+    fps = 23.976
+    # mkv-style: frame k stored as round(k / fps) in a 1ms timebase
+    pts = [round(k / fps, 3) for k in range(24 * 60)]
+    shuffled = list(pts)
+    random.Random(7).shuffle(shuffled)
+    grid = [i * 0.25 for i in range(0, 60, 2)]
+    snapped = _snap_times(grid, shuffled)
+    assert all(s is not None for s in snapped)
+    for t, s in zip(grid, snapped):
+        assert abs(s - t) < 0.5 / fps
+        assert s in pts
+    # a time with no frame nearby (huge gap) stays unsnapped
+    assert _snap_times([1000.0], [1.0, 2.0, 3.0]) == [None]
+
+
+def test_extract_frames_snaps_off_grid_requests(tmp_path, monkeypatch):
+    """End-to-end single-pass extraction: grid AND off-grid (mkv-style
+    ms-quantized) request times all deliver from one select pass, in
+    request order, with no per-frame seek fallback. (Threshold lowered
+    so the small batch takes the select route; production routes
+    batches <ARBITER_SELECT_MIN to per-seek — cheaper than another
+    full-movie decode.)"""
+    import logging
+    import subprocess
+
+    monkeypatch.setattr(config, "ARBITER_SELECT_MIN", 2)
+    from scanner.arbiter import extract_frames
+
+    clip = str(tmp_path / "src.mp4")
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=size=640x270:rate=24",
+         "-t", "8", "-c:v", "libx264", "-pix_fmt", "yuv420p", clip],
+        check=True)
+    times = [0.5, 1.002, 1.75, 2.501, 3.25, 4.999, 5.75, 6.499]
+    work = tmp_path / "frames"
+
+    warnings: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda rec: warnings.append(rec.getMessage())
+    logging.getLogger("scanner.arbiter").addHandler(handler)
+    try:
+        files = extract_frames(clip, times, work)
+    finally:
+        logging.getLogger("scanner.arbiter").removeHandler(handler)
+
+    assert len(files) == len(times)
+    assert all(f.exists() for f in files)
+    assert not list(work.glob("seek_*.jpg")), "per-seek fallback used"
+    # re-extraction into the same workdir must not count stale files
+    files2 = extract_frames(clip, times[:3], work)
+    assert len(files2) == 3 and all(f.exists() for f in files2)

@@ -220,6 +220,7 @@ scans/*
 !scans/GUIDE_AB_RESULTS.md
 !scans/VLM_RUNS.md
 !scans/SAM3_MASK_TIMING.md
+!scans/THROUGHPUT.md
 !scans/guide_cache/
 .replay/
 mask_outputs/

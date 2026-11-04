@@ -31,6 +31,7 @@ Planning policy (trusted sources + person gate; see config):
 from __future__ import annotations
 
 import base64
+import bisect
 import json
 import logging
 import re
@@ -463,23 +464,105 @@ def _subtract(intervals: list[tuple], holes: list[tuple]) -> list[tuple]:
 
 def extract_frames(video_path: str, times: list[float], workdir: Path,
                    frame_w: int = config.ARBITER_FRAME_W) -> list[Path]:
-    """Extract JPEGs for `times` (sorted, seconds) via one ffmpeg select pass.
+    """Extract JPEGs for `times` (sorted, seconds) in `times` order.
 
-    Falls back to per-timestamp seeks when the single pass under-delivers
-    (e.g. container timestamp quirks). Files are returned in `times` order.
+    Requests are first snapped to actual frame timestamps (demux-only
+    ffprobe pass), so one exact-window ffmpeg select pass delivers
+    everything. The old count-matched pass requested the sample grid
+    directly: ms-quantized container timebases (mkv) sit up to half a
+    frame interval off the grid, only ~26% of +-5ms windows hit (GG:
+    478/1867), and EVERY frame was then re-extracted by individual
+    seeks. Now only genuinely missing frames (probe failure, VFR
+    oddity) take the per-frame seek path.
     """
     workdir.mkdir(parents=True, exist_ok=True)
-    files = _extract_select(video_path, times, workdir, frame_w)
-    if files is not None and len(files) == len(times):
-        return files
-    logger.warning("[arbiter] single-pass extraction mismatch (%s/%d); "
-                   "falling back to per-frame seek",
-                   "-" if files is None else len(files), len(times))
-    return _extract_seek(video_path, times, workdir, frame_w)
+    for old in workdir.glob("frame_*.jpg"):
+        old.unlink()                # stale files broke count checks
+    snapped = _snap_times(times, _video_frame_pts(video_path))
+    uniq = sorted({s for s in snapped if s is not None})
+    by_time: dict[float, Path] = {}
+    # small batches go straight to per-seek: a select pass costs one
+    # full-movie decode (~126s on GG) while seeks cost ~0.2s/frame —
+    # under a few hundred frames seeking is cheaper than decoding the
+    # movie again (the sweep is ~1.9k frames -> select; window and
+    # expansion passes are ~0.2k -> seek)
+    if uniq and len(uniq) >= config.ARBITER_SELECT_MIN:
+        files = _extract_select(video_path, uniq, workdir, frame_w)
+        if files is not None:
+            by_time = dict(zip(uniq, files))
+    missing = sum(1 for s in snapped if s is None or s not in by_time)
+    if missing:
+        logger.warning("[arbiter] %d/%d frames missing after select "
+                       "pass — per-frame seek for those only",
+                       missing, len(times))
+    out: list[Path] = []
+    for t, s in zip(times, snapped):
+        f = by_time.get(s) if s is not None else None
+        if f is None:
+            f = _extract_seek_one(video_path, t, workdir, len(out),
+                                  frame_w)
+        if f is not None:
+            out.append(f)
+    return out
+
+
+def _video_frame_pts(video_path: str) -> list[float]:
+    """Video packet PTS seconds, demux-only (no decode — seconds for a
+    full movie). These are the frame timestamps the select filter's
+    `t` actually takes; requesting anything else is what silently
+    starved the old pass on ms-timebase containers."""
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
+           "-show_entries", "packet=pts_time", "-of", "csv=p=0",
+           video_path]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True,
+                             check=True, timeout=600).stdout
+    except (subprocess.SubprocessError, OSError) as e:
+        logger.warning("[arbiter] packet-pts probe failed: %s", e)
+        return []
+    pts: list[float] = []
+    for line in out.splitlines():
+        try:
+            pts.append(float(line.strip()))
+        except ValueError:
+            pass
+    return pts
+
+
+def _snap_times(times: list[float],
+                pts: list[float]) -> list[float | None]:
+    """Snap each requested time to the nearest actual frame timestamp,
+    -> None where no frame sits within half a frame interval (those
+    keep their original time and take the seek fallback)."""
+    pts = sorted(pts)   # ffprobe emits packets in DECODE order
+    # (B-frames); bisect requires presentation order
+    if not pts:
+        return [None] * len(times)
+    gaps = sorted(b - a for a, b in zip(pts, pts[1:]) if b > a)
+    # 0.5x the median gap: a request can sit at most half a frame
+    # interval from its nearest frame (worst case: dead center between
+    # two). +2ms absorbs sub-ms float/timestamp noise at that boundary.
+    # Request spacing must exceed one frame interval to guarantee no
+    # double-mapping — the arbiter samples at >=0.25s vs ~42ms
+    # frames, so that holds by construction.
+    half_frame = 0.5 * (gaps[len(gaps) // 2] if gaps else 1 / 24.0) + 0.002
+    out: list[float | None] = []
+    for t in times:
+        i = bisect.bisect_left(pts, t)
+        cand = [j for j in (i - 1, i) if 0 <= j < len(pts)]
+        if not cand:
+            out.append(None)
+            continue
+        j = min(cand, key=lambda j: abs(pts[j] - t))
+        out.append(pts[j] if abs(pts[j] - t) <= half_frame else None)
+    return out
 
 
 def _extract_select(video_path: str, times: list[float], workdir: Path,
                     frame_w: int) -> list[Path] | None:
+    """One exact-window ffmpeg select pass over the movie. -> sorted
+    paths when exactly len(times) frames came out, else None (caller
+    per-seeks the gap; partial output cannot be aligned reliably)."""
     if not times:
         return []
     eps = 0.005
@@ -494,29 +577,36 @@ def _extract_select(video_path: str, times: list[float], workdir: Path,
             str(out_base) + "_%05d.jpg"]
     try:
         subprocess.run(cmd, capture_output=True, check=True, timeout=1800)
+    except subprocess.CalledProcessError as e:
+        tail = (e.stderr or b"")[-300:].decode(errors="replace")
+        logger.warning("[arbiter] select pass failed (rc=%s): %s",
+                       e.returncode, tail)   # never log the multi-MB cmd
+        return None
     except (subprocess.SubprocessError, OSError) as e:
         logger.warning("[arbiter] select pass failed: %s", e)
         return None
     files = sorted(workdir.glob("frame_*.jpg"))
-    return files if len(files) == len(times) else files
+    return files if len(files) == len(times) else None
 
 
-def _extract_seek(video_path: str, times: list[float], workdir: Path,
-                  frame_w: int) -> list[Path]:
-    out: list[Path] = []
-    for i, t in enumerate(times):
-        dest = workdir / f"seek_{i:05d}_{t:.2f}.jpg"
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
-               "-ss", f"{max(0.0, t - 0.05):.3f}", "-i", video_path,
-               "-frames:v", "1",
-               "-vf", f"scale='min({frame_w},iw)':-2", "-q:v", "3",
-               str(dest)]
-        try:
-            subprocess.run(cmd, capture_output=True, check=True, timeout=120)
-        except (subprocess.SubprocessError, OSError) as e:
-            logger.warning("[arbiter] seek extract failed at %.2fs: %s", t, e)
-        out.append(dest)
-    return [f for f in out if f.exists()]
+def _extract_seek_one(video_path: str, t: float, workdir: Path, i: int,
+                      frame_w: int) -> Path | None:
+    """Single-frame seek extraction — the fallback for frames the
+    select pass could not deliver."""
+    dest = workdir / f"seek_{i:05d}_{t:.2f}.jpg"
+    dest.unlink(missing_ok=True)     # same name can recur across a run's
+    # successive extract calls; never return a stale frame
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error",
+           "-ss", f"{max(0.0, t - 0.05):.3f}", "-i", video_path,
+           "-frames:v", "1",
+           "-vf", f"scale='min({frame_w},iw)':-2", "-q:v", "3",
+           str(dest)]
+    try:
+        subprocess.run(cmd, capture_output=True, check=True, timeout=120)
+    except (subprocess.SubprocessError, OSError) as e:
+        logger.warning("[arbiter] seek extract failed at %.2fs: %s", t, e)
+        return None
+    return dest if dest.exists() else None
 
 
 # --- HTTP backend (OpenAI-compatible sidecar, e.g. llama-server) ---------------
