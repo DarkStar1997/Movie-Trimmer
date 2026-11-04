@@ -134,7 +134,8 @@ class Sam3Segmenter:
         x = cv2.resize(frame_rgb, (self.in_size, self.in_size),
                        interpolation=cv2.INTER_LINEAR)
         x = ((x.astype(np.float32) / 255.0) - 0.5) / 0.5
-        return torch.from_numpy(x.transpose(2, 0, 1)[None]).to(self.device)
+        return self._torch.from_numpy(
+            x.transpose(2, 0, 1)[None]).to(self.device)
 
     def all_persons(self, frame_rgb: np.ndarray) -> np.ndarray | None:
         """-> union mask of every person instance, or None when the model
