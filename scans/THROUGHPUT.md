@@ -134,3 +134,23 @@ judging (~410s/2k frames, compute-bound — a smaller/faster judge model
 is the only real lever, a quality decision), the sweep decode (126s —
 shared with decode_gate if ever worth pipelining), NVENC P5 encode
 (~450fps ceiling — P4/P3 declined, table above).
+
+## Post-strip confirmation (2026-11-05, commit 497c6a5)
+
+NudeNet fully removed (detector/policy/tracking modules deleted; images
+scanner `3aac2e63` / allinone `a0f2df11`). GG end-to-end revalidation on
+the stripped build, same env:
+
+| | baseline (C, detector=false flag) | stripped build | |
+|---|---|---|---|
+| scan wall | 795.7s | 820.8s | +3% (VLM judging variance) |
+| — decode_gate | 185s | 179.5s | control, unchanged |
+| — arbiter | 609s | 639.9s | 1867 planned (sweep 1658 / window 209) — exactly as planned |
+| segments | 21–24 band | 23 (21 arbiter + 4 crowd, 2 merged) | in band |
+| render wall | 585.7s | 588.1s | +0.4% |
+| — analysis | 140.2s | 140.4s | unchanged |
+| keyframes / frames_masked | 17,007 / 16,997 | 17,007 / 16,997 | identical |
+| verify gate | ALL PASS, seg 0 = 703,154 px | ALL PASS 11/11, seg 0 = 703,154 px | byte-identical mask path |
+
+Scan record: `scans/gone_girl_stripped_confirm.json`. The vlm-only mask
+path reproduces the baseline exactly — the strip cost nothing.
