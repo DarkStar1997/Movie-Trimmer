@@ -17,8 +17,10 @@
 FROM ghcr.io/darkstar1997/movietrimmer-nudenet-weights:v1 AS weights
 FROM ghcr.io/darkstar1997/movietrimmer-rfdetr-seg-weights:v1 AS seg-weights
 # SAM 3.1 grounded segmenter (experimental, /mask segmenter=sam3): the
-# visiontouch deployment weights — FP8-quantized dynk ONNX pair.
-FROM ghcr.io/dishiye/sam3-models:fp8-dynk-onnx AS sam3-weights
+# visiontouch deployment weights — FP8-quantized dynk ONNX pair. Same
+# org as the other weight images (this repo's GHCR namespace; the
+# visiontouch and dishaeye copies are mirrors of this origin).
+FROM ghcr.io/darkstar1997/sam3-models:fp8-dynk-onnx AS sam3-weights
 
 FROM pytorch/pytorch:2.14.0-cuda13.0-cudnn9-runtime
 
