@@ -577,14 +577,19 @@ def render_pass(video_path: str, out_path: str, segments: list[dict],
 def run_mask(video_path: str, segments: list[dict], out_path: str, *,
              policy: Policy, backend: str = "trt",
              window: tuple[float, float] | None = None,
-             cq: int = None) -> dict:
+             cq: int = None, segmenter: str = "rfdetr") -> dict:
     """Full stage-C pipeline: analysis (masks) -> render.
 
     Full renders take the GPU-native path (NVDEC -> torch NV12 zero-copy ->
     in-place solid-black fill -> NVENC, audio passthrough, one continuous
     pass — no cut boundaries). A `window` takes the pipe-path preview
-    render."""
+    render. `segmenter` picks the person segmenter for all-persons
+    masking: "rfdetr" (default) or "sam3" (experimental — VLM-sourced
+    segments only)."""
     t0 = time.monotonic()
+    if segmenter not in ("rfdetr", "sam3"):
+        raise ValueError(f"unknown segmenter {segmenter!r} "
+                         "(rfdetr | sam3)")
     if window is not None:
         a, b = window
         segments = [dict(s) for s in segments
@@ -607,15 +612,24 @@ def run_mask(video_path: str, segments: list[dict], out_path: str, *,
                 or any(str(k).startswith("cringemdb") for k in labs))
     detector = (NudeNetDetector(backend=backend)
                 if any(not _vlm_sourced(s) for s in segments) else None)
-    segmenter = PersonSegmenter(backend="trt" if backend != "ort" else "ort")
+    if detector is not None and segmenter == "sam3":
+        raise ValueError(
+            "sam3 segmenter supports all-person masking only — "
+            "detector-sourced segments need box matching (rfdetr)")
+    if segmenter == "sam3":
+        from .sam3 import Sam3Segmenter
+        seg_engine: PersonSegmenter | Sam3Segmenter = Sam3Segmenter()
+    else:
+        seg_engine = PersonSegmenter(
+            backend="trt" if backend != "ort" else "ort")
     per_seg = analysis_pass(video_path, segments, policy, detector,
-                            segmenter, aw, ah)
+                            seg_engine, aw, ah)
     if not any(per_seg.values()):
         raise RuntimeError("analysis produced no masks — nothing to mask")
 
     # analysis is done: free its TRT engines so the render has the whole
     # GPU (render re-imports nothing from analysis)
-    del detector, segmenter
+    del detector, seg_engine
     try:
         import torch
         torch.cuda.empty_cache()

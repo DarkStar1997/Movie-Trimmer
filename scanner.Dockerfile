@@ -16,6 +16,9 @@
 # Base matches the visiontouch/fitness-coach stack (torch 2.14.0 / CUDA 13.0).
 FROM ghcr.io/darkstar1997/movietrimmer-nudenet-weights:v1 AS weights
 FROM ghcr.io/darkstar1997/movietrimmer-rfdetr-seg-weights:v1 AS seg-weights
+# SAM 3.1 grounded segmenter (experimental, /mask segmenter=sam3): the
+# visiontouch deployment weights — FP8-quantized dynk ONNX pair.
+FROM ghcr.io/dishiye/sam3-models:fp8-dynk-onnx AS sam3-weights
 
 FROM pytorch/pytorch:2.14.0-cuda13.0-cudnn9-runtime
 
@@ -72,6 +75,8 @@ RUN pip install --no-cache-dir PyNvVideoCodec==2.2.3
 COPY --from=weights /models/nudenet_320n_v1.onnx /opt/models/
 COPY --from=weights /models/nudenet_640m_v1.onnx /opt/models/
 COPY --from=seg-weights /models/person_seg_rfdetr_seg_medium_v1.onnx /opt/models/
+COPY --from=sam3-weights /models/sam3_grounding_fp8_dynk.onnx /opt/models/
+COPY --from=sam3-weights /models/sam3_grounding_fp8_dynk.onnx_data /opt/models/
 
 COPY scanner/ /app/scanner/
 WORKDIR /app

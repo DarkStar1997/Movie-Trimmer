@@ -156,10 +156,13 @@ async def run_mask_job(mask_id: str, video_path: str, segments: list[dict],
                         policy_overrides: Optional[dict],
                         window: Optional[tuple], cq: Optional[int],
                         output_name: Optional[str] = None,
-                        bake_chapters: bool = True) -> None:
+                        bake_chapters: bool = True,
+                        segmenter: Optional[str] = None) -> None:
     entry = mask_store[mask_id]
     entry["video_path"] = video_path
     entry["segments"] = segments
+    if segmenter:
+        entry["segmenter"] = segmenter
     try:
         async with mask_semaphore:
             entry["status"] = "processing"
@@ -171,7 +174,8 @@ async def run_mask_job(mask_id: str, video_path: str, segments: list[dict],
             entry["output"] = str(out)
             fn = functools.partial(
                 run_mask, video_path, segments, str(out), policy=policy,
-                window=window, cq=cq)
+                window=window, cq=cq,
+                segmenter=segmenter or config.MASK_SEGMENTER)
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, fn)
             entry.update(result)

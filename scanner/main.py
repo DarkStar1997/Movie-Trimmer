@@ -187,7 +187,15 @@ async def submit_mask(
     bake_chapters: bool = Form(True,
                                 description="Bake mask-region chapters "
                                             "into the render (full movies)"),
+    segmenter: str = Form(config.MASK_SEGMENTER,
+                          description="person segmenter for all-person "
+                                      "masking: rfdetr (default, fast) | "
+                                      "sam3 (experimental, ~5.4x slower, "
+                                      "VLM-sourced segments only)"),
 ):
+    if segmenter not in ("rfdetr", "sam3"):
+        raise HTTPException(400, f"unknown segmenter {segmenter!r} "
+                                 "(rfdetr | sam3)")
     if not Path(video_path).exists():
         raise HTTPException(400, f"video_path not found: {video_path}")
     if (window_start is None) != (window_end is None):
@@ -210,7 +218,8 @@ async def submit_mask(
               else None)
     background_tasks.add_task(
         run_mask_job, mask_id, video_path, segs, policy_overrides,
-        window, cq, output_name=output_name, bake_chapters=bake_chapters)
+        window, cq, output_name=output_name, bake_chapters=bake_chapters,
+        segmenter=segmenter)
     return JSONResponse({
         "mask_id": mask_id,
         "status": mask_store[mask_id]["status"],
