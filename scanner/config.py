@@ -152,6 +152,15 @@ PERSON_SEG = {
 MASK_KEYFRAME_FPS = 0.0
 MASK_BOX_PAD_FRAC = 0.35    # explicit box padding before mask intersection
 MASK_DILATE_FRAC = 0.012   # mask dilation, fraction of frame width
+# Temporal mask smoothing (2026-11-04): per-frame person masks are
+# independent segmentations, which flickers and wobbles during motion.
+# Each rendered mask unions an eroding carry of the previous one: dropouts
+# bridge, edges stabilise, and the carry decays so masks still track.
+# MASK_SMOOTH=0 restores the pre-smoothing behaviour exactly.
+MASK_SMOOTH = os.environ.get("MASK_SMOOTH", "1").lower() not in (
+    "0", "false", "no", "off")
+MASK_SMOOTH_ERODE_FRAC = float(os.environ.get("MASK_SMOOTH_ERODE_FRAC",
+                                              "0.006"))
 # Fallback chain, first usable wins. NB: av1_nvenc is deliberately absent —
 # it fails with -22 EINVAL on this host/driver even bare (rawvideo-pipe path),
 # while hevc/h264 accept the full quality args. libx264 = CPU last resort.

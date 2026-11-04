@@ -172,6 +172,33 @@ def dilate_mask(mask: np.ndarray, kernel_px: int) -> np.ndarray:
     return cv2.dilate(mask.astype(np.uint8), k).astype(bool)
 
 
+def erode_mask(mask: np.ndarray, kernel_px: int) -> np.ndarray:
+    if kernel_px <= 1 or not mask.any():
+        return mask
+    k = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (kernel_px, kernel_px))
+    return cv2.erode(mask.astype(np.uint8), k).astype(bool)
+
+
+def temporal_step(raw: np.ndarray, prev: np.ndarray | None,
+                  dilate_px: int, smooth_px: int) -> np.ndarray:
+    """One frame of temporal mask smoothing (smooth_px <= 1 disables).
+
+    The rendered mask is the current detection dilated, unioned with a
+    per-frame ERODED carry of the previous rendered mask. The carry
+    bridges segmentation dropouts and boundary jitter — a mask never
+    flickers off for a few missed frames and edges stop wobbling — while
+    the erosion bounds it: a carried silhouette shrinks by smooth_px per
+    frame, so masks track motion and fully decay within roughly
+    (mask half-width / smooth_px) frames of the person leaving. Static
+    content converges to the plain dilated mask (no runaway growth);
+    moving content trails a small bounded halo behind the person."""
+    cur = dilate_mask(raw, dilate_px)
+    if smooth_px > 1 and prev is not None and prev.any():
+        cur = cur | erode_mask(prev, smooth_px)
+    return cur
+
+
 def blackout_rgb(frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
     """Solid black inside `mask` (person silhouette shape).
 
@@ -221,7 +248,8 @@ def keyframe_masks_for(dets_per_frame, frames, policy, segmenter,
                        dilate_px: int, vlm_source: bool = False,
                        vlm_score: float = 0.9,
                        src_label: str = "VLM",
-                       track_state: dict | None = None
+                       track_state: dict | None = None,
+                       smooth_px: int = 0
                        ) -> list[tuple[np.ndarray, str, float]]:
     """Per keyframe (mask, label, score) at analysis res for one batch.
 
@@ -249,13 +277,26 @@ def keyframe_masks_for(dets_per_frame, frames, policy, segmenter,
             # arbiter/crowd segment: no NudeNet boxes by construction —
             # mask all persons; the source saw nudity, so err wide
             pmask = segmenter.all_persons(frame)
-            if pmask is None or not pmask.any():
+            raw = (pmask if pmask is not None and pmask.any()
+                   else np.zeros((h, w), dtype=bool))
+            prev = state.get("sm_prev")
+            if (not raw.any() and prev is not None and prev.any()
+                    and smooth_px > 1):
+                # segmenter dropout mid-segment: ride the eroding carry
+                # instead of jumping to the big center-square fallback
+                final = temporal_step(raw, prev, 0, smooth_px)
+                state["sm_prev"] = final
+                out.append((final, src_label, vlm_score))
+                continue
+            if not raw.any():
                 frac = config.MASK_VLM_CENTER_FRAC
-                pmask = box_mask(
+                raw = box_mask(
                     np.asarray([(1 - frac) * w / 2, (1 - frac) * h / 2,
                                 (1 + frac) * w / 2, (1 + frac) * h / 2]),
                     w, h)
-            out.append((dilate_mask(pmask, dilate_px), src_label, vlm_score))
+            final = temporal_step(raw, prev, dilate_px, smooth_px)
+            state["sm_prev"] = final
+            out.append((final, src_label, vlm_score))
             continue
 
         # strongest trigger-passing detection this frame (for the overlay)
@@ -288,7 +329,10 @@ def keyframe_masks_for(dets_per_frame, frames, policy, segmenter,
                 score = state.get("score", 0.0)
             else:
                 state["bbox"] = None             # person left the frame
-        out.append((dilate_mask(union, dilate_px), label, score))
+        final = temporal_step(union, state.get("sm_prev"),
+                              dilate_px, smooth_px)
+        state["sm_prev"] = final
+        out.append((final, label, score))
     return out
 
 
@@ -329,6 +373,8 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
     kf_fps = config.MASK_KEYFRAME_FPS or min(probe_fps(video_path), 30.0)
     # dilation covers keyframe-hold motion; scaled to the analysis resolution
     dilate_px = max(3, int(round(config.MASK_DILATE_FRAC * aw)))
+    smooth_px = (max(2, int(round(config.MASK_SMOOTH_ERODE_FRAC * aw)))
+                 if config.MASK_SMOOTH else 0)
     per_seg: dict[int, list] = {}
     for si, seg in enumerate(segments):
         start, end = float(seg["start"]), float(seg["end"])
@@ -349,7 +395,8 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
                                        dilate_px, vlm_source=vlm,
                                        vlm_score=vlm_score,
                                        src_label=src_label,
-                                       track_state=track_state)
+                                       track_state=track_state,
+                                       smooth_px=smooth_px)
             for j, (m, label, score) in enumerate(masks):
                 if m.any():
                     t = t0 + (first_idx + j) / kf_fps
