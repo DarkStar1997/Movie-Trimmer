@@ -50,7 +50,8 @@ class TestUnionPersonMask:
         outs, names = _fake_outs(torch, [5.0, -9.0, 5.0, -9.0],
                                  [5.0], m)
         mask = union_person_mask(outs, names, 0.5, 8, 8, 16)
-        assert mask is not None and mask.shape == (8, 8)
+        assert isinstance(mask, np.ndarray) and mask.dtype == bool
+        assert mask.shape == (8, 8)
         assert mask[:4, :4].any() and mask[4:, 4:].any()
         assert not mask[4:, :4].any()   # q1/q3 must not leak in
 

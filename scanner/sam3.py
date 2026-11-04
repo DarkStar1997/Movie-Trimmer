@@ -77,7 +77,9 @@ def union_person_mask(outs: dict, out_names: list[str], thresh: float,
     up = torch.nn.functional.interpolate(
         m[None], size=(h0, w0), mode="bilinear", align_corners=False)[0]
     union = (up > 0.5).any(0)
-    return union if bool(union.any()) else None
+    if not bool(union.any()):
+        return None
+    return union.cpu().numpy()          # HxW bool — personseg contract
 
 
 class Sam3Segmenter:
