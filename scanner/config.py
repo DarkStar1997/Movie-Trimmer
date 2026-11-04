@@ -161,6 +161,14 @@ MASK_SMOOTH = os.environ.get("MASK_SMOOTH", "1").lower() not in (
     "0", "false", "no", "off")
 MASK_SMOOTH_ERODE_FRAC = float(os.environ.get("MASK_SMOOTH_ERODE_FRAC",
                                               "0.006"))
+# Analysis/render overlap (2026-11-05): full renders start the GPU render
+# as soon as the FIRST segment's masks exist; the remaining segments'
+# analysis runs concurrently and hides under the encode-bound render
+# (measured: decode 2300fps, encode ~450fps at P5 — analysis was pure
+# serial overhead). MASK_OVERLAP=0 restores the strict
+# analysis-then-render sequence.
+MASK_OVERLAP = os.environ.get("MASK_OVERLAP", "1").lower() not in (
+    "0", "false", "no", "off")
 # Fallback chain, first usable wins. NB: av1_nvenc is deliberately absent —
 # it fails with -22 EINVAL on this host/driver even bare (rawvideo-pipe path),
 # while hevc/h264 accept the full quality args. libx264 = CPU last resort.

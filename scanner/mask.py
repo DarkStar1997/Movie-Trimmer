@@ -361,7 +361,8 @@ def failsafe_entries(seg: dict, aw: int, ah: int) -> list[tuple]:
 
 def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
                   detector: NudeNetDetector, segmenter: PersonSegmenter,
-                  aw: int, ah: int, batch_size: int = 16) -> dict[int, list]:
+                  aw: int, ah: int, batch_size: int = 16,
+                  on_segment=None) -> dict[int, list]:
     """-> {segment_index: [(t, packed_mask_bytes, label, score), ...]} by t.
 
     label/score ride along for the warning overlay: the trigger label +
@@ -369,7 +370,12 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
     arbiter-found segments (identified by 'arbiter' in seg['labels']),
     "CRINGEMDB:<category>" + crowd score for community-timestamp
     segments (labels starting with 'cringemdb'). Both non-detector
-    sources mask every person, with a center fallback."""
+    sources mask every person, with a center fallback.
+
+    on_segment(si) fires right after each segment's entries are final —
+    the analysis/render overlap hands the render its per-segment go
+    signal this way. Segments are processed in order, so callers may
+    rely on that ordering when consuming."""
     kf_fps = config.MASK_KEYFRAME_FPS or min(probe_fps(video_path), 30.0)
     # dilation covers keyframe-hold motion; scaled to the analysis resolution
     dilate_px = max(3, int(round(config.MASK_DILATE_FRAC * aw)))
@@ -443,6 +449,8 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
                                "(label %s)", si, int(start), int(end),
                                fb[0][2])
         per_seg[si] = entries
+        if on_segment is not None:
+            on_segment(si)
         logger.info("[mask] segment %d [%d-%d]%s: %d mask keyframes",
                     si, int(start), int(end),
                     " (vlm)" if vlm else "", len(entries))
@@ -608,37 +616,113 @@ def run_mask(video_path: str, segments: list[dict], out_path: str, *,
     detector = (NudeNetDetector(backend=backend)
                 if any(not _vlm_sourced(s) for s in segments) else None)
     segmenter = PersonSegmenter(backend="trt" if backend != "ort" else "ort")
-    per_seg = analysis_pass(video_path, segments, policy, detector,
-                            segmenter, aw, ah)
-    if not any(per_seg.values()):
-        raise RuntimeError("analysis produced no masks — nothing to mask")
-
-    # analysis is done: free its TRT engines so the render has the whole
-    # GPU (render re-imports nothing from analysis)
-    del detector, segmenter
-    try:
-        import torch
-        torch.cuda.empty_cache()
-    except ImportError:
-        pass
-
     out_path = str(out_path)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    if window is not None:
-        render = render_pass(video_path, out_path, segments, per_seg, w, h,
-                             aw, ah, window, cq=cq)
-    else:
-        from .gpu_render import render_gpu
-        # subtitle-bearing sources render from a sub-free copy (video+audio
-        # stay bit-exact; see strip_subtitles)
-        render_path = (strip_subtitles(video_path, Path(out_path).parent)
-                       if count_subtitle_streams(video_path) else video_path)
+
+    # analysis/render overlap (full renders, MASK_OVERLAP=1): analysis
+    # produces masks segment-by-segment in order and the render head
+    # consumes them in the same order, so the render starts as soon as
+    # segment 0's masks exist and the remaining segments' analysis hides
+    # under the encode-bound render (encode is ~2x the analysis wall —
+    # serial analysis was pure overhead). Window previews keep the
+    # strict sequence; their ranges are small.
+    overlap = bool(segments) and config.MASK_OVERLAP and window is None
+    t_analysis = time.monotonic()
+    per_seg: dict[int, list] = {}
+    analysis_th = None
+    seg_ready = None
+    analysis_err: list = []
+    analysis_done = [t_analysis]
+
+    def _release_analysis_engines() -> None:
+        # analysis is done: drop its TRT engines so later work has the
+        # whole GPU (the render re-imports nothing from analysis). None
+        # assignment rather than del — the names are captured by the
+        # overlap thread's closure; with it joined, these are the last
+        # strong references and the engines free here.
+        nonlocal detector, segmenter
+        detector = segmenter = None
         try:
-            render = render_gpu(render_path, out_path, segments, per_seg,
-                                w, h, aw, ah, cq=cq)
-        finally:
-            if render_path != video_path:
-                Path(render_path).unlink(missing_ok=True)
+            import torch
+            torch.cuda.empty_cache()
+        except ImportError:
+            pass
+
+    if not overlap:
+        per_seg = analysis_pass(video_path, segments, policy, detector,
+                                segmenter, aw, ah)
+        analysis_done[0] = time.monotonic()
+        if not any(per_seg.values()):
+            raise RuntimeError("analysis produced no masks — nothing to mask")
+        _release_analysis_engines()
+    else:
+        import threading
+        ready = {si: threading.Event() for si in range(len(segments))}
+
+        def _on_segment(si: int) -> None:
+            ready[si].set()
+
+        def _seg_ready(si: int) -> None:
+            """Block until segment si's masks are final; raise when the
+            analysis thread died, failing the render rather than
+            silently emitting an unmasked movie."""
+            ev = ready.get(si)
+            if ev is not None:
+                ev.wait()
+            if analysis_err:
+                raise RuntimeError(
+                    f"mask analysis failed: {analysis_err[0]}"
+                ) from analysis_err[0]
+
+        def _analyze() -> None:
+            try:
+                per_seg.update(analysis_pass(
+                    video_path, segments, policy, detector, segmenter,
+                    aw, ah, on_segment=_on_segment))
+            except Exception as e:  # noqa: BLE001
+                analysis_err.append(e)
+                for ev in ready.values():   # wake every waiter to fail
+                    ev.set()
+            finally:
+                analysis_done[0] = time.monotonic()
+
+        seg_ready = _seg_ready
+        analysis_th = threading.Thread(target=_analyze,
+                                       name="mask-analysis", daemon=True)
+        analysis_th.start()
+
+    try:
+        if window is not None:
+            render = render_pass(video_path, out_path, segments, per_seg,
+                                 w, h, aw, ah, window, cq=cq)
+        else:
+            from .gpu_render import render_gpu
+            # subtitle-bearing sources render from a sub-free copy
+            # (video+audio stay bit-exact; see strip_subtitles) — under
+            # overlap this remux runs while the analysis thread works
+            render_path = (strip_subtitles(video_path, Path(out_path).parent)
+                           if count_subtitle_streams(video_path)
+                           else video_path)
+            try:
+                render = render_gpu(render_path, out_path, segments,
+                                    per_seg, w, h, aw, ah, cq=cq,
+                                    seg_ready=seg_ready)
+            finally:
+                if render_path != video_path:
+                    Path(render_path).unlink(missing_ok=True)
+    finally:
+        # never leave the analysis thread running: it holds TRT engines
+        # and CUDA memory the next job would contend with
+        if analysis_th is not None:
+            analysis_th.join()
+
+    if overlap:
+        if not any(per_seg.values()):
+            raise RuntimeError("analysis produced no masks — nothing to mask")
+        if analysis_err:
+            raise RuntimeError(f"mask analysis failed: {analysis_err[0]}")
+        _release_analysis_engines()
+    analysis_wall_s = round(analysis_done[0] - t_analysis, 2)
 
     dur = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -650,5 +734,6 @@ def run_mask(video_path: str, segments: list[dict], out_path: str, *,
         "keyframes": sum(len(v) for v in per_seg.values()),
         "duration_out": float(dur),
         "wall_time_s": round(time.monotonic() - t0, 2),
+        "analysis_wall_s": analysis_wall_s,
         **render,
     }

@@ -259,11 +259,20 @@ def run_scan(
             "enabled": bool(arbiter), "reason": "disabled" if not arbiter
             else "person gate off"}
 
+    # per-stage walls (throughput instrumentation): decode_gate covers
+    # scan start through decode+detector+gate feeding, sample smoothing
+    # and the gate-stream join; crowd/guide/arbiter each measure their
+    # own span (arbiter includes lead clustering + apply); finalize is
+    # the residual.
+    t_stage = time.monotonic()
+    decode_gate_s = t_stage - t0
+
     # stage C: crowd timestamps (CringeMDB, opt-in, fail-soft) — merged
     # BEFORE the arbiter: crowd ranges are TRUSTED (mask-final), so the
     # VLM must not spend frames inside them either. Union-merge only:
     # community ranges can never remove model-found segments.
     crowd_block: Optional[dict] = None
+    t_stage = time.monotonic()
     if crowd:
         crowd_block = fetch_crowd_segments(
             Path(video_path).name, title=crowd_title, year=crowd_year,
@@ -271,6 +280,7 @@ def run_scan(
             cache_dir=Path(config.CROWD_CACHE_DIR))
         if crowd_block["segments"]:
             segments = merge_crowd_segments(segments, crowd_block)
+    crowd_s = time.monotonic() - t_stage
 
     # stage E: parents-guide film-context (IMDb, opt-in, fail-soft) —
     # loaded BEFORE the arbiter so its Sex & Nudity items can serve as
@@ -278,9 +288,11 @@ def run_scan(
     # fetch, no cache, no IMDb match) is recorded and the scan proceeds
     # with the byte-identical context-free prompt.
     guide_block: Optional[dict] = None
+    t_stage = time.monotonic()
     if guide:
         guide_block = fetch_guide_context(
             Path(video_path).name, title=crowd_title, year=crowd_year)
+    guide_s = time.monotonic() - t_stage
 
     # stage B: sparse VLM arbitration (opt-in; failure never fails the scan)
     # weak hits: cluster sub-threshold trigger bursts (<=2s gap) to their
@@ -299,6 +311,7 @@ def run_scan(
     companions = sorted({round(min(max(t + d, 0.0), duration), 3)
                          for t in orphans for d in (-0.5, 0.5)
                          if 0.0 <= t + d <= duration})
+    t_stage = time.monotonic()          # arbiter span incl. lead clustering
     arbiter_block: Optional[dict] = None
     if arbiter:
         arbiter_block = run_arbiter(
@@ -318,8 +331,10 @@ def run_scan(
             segments = _apply_arbiter(segments, arbiter_block)
             arbiter_block["segments_pre_arbiter"] = pre
 
+    arbiter_s = time.monotonic() - t_stage
     bridged_total = sum(bridge_only)
     wall = time.monotonic() - t0
+    finalize_s = wall - decode_gate_s - crowd_s - guide_s - arbiter_s
 
     return {
         "duration": round(duration, 3),
@@ -356,6 +371,13 @@ def run_scan(
         "person_gate": gate_stats,
         "crowd": crowd_block,
         "guide": guide_block,
+        "stages": {
+            "decode_gate_s": round(decode_gate_s, 2),
+            "crowd_s": round(crowd_s, 2) if crowd else None,
+            "guide_s": round(guide_s, 2) if guide else None,
+            "arbiter_s": round(arbiter_s, 2) if arbiter else None,
+            "finalize_s": round(finalize_s, 2),
+        },
         "wall_time_s": round(wall, 2),
         "infer_time_s": round(infer_s, 2),
     }

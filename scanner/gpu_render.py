@@ -38,8 +38,14 @@ def _torch_mask(mask_np: np.ndarray, device) -> "torch.Tensor":
 
 def render_gpu(video_path: str, out_path: str, segments: list[dict],
                per_seg: dict[int, list], w: int, h: int, aw: int, ah: int,
-               cq: int | None = None) -> dict:
-    """-> stats dict. Requires the container's GPU stack (torch + CUDA)."""
+               cq: int | None = None, seg_ready=None) -> dict:
+    """-> stats dict. Requires the container's GPU stack (torch + CUDA).
+
+    seg_ready(si) blocks until segment si's analysis entries are final
+    (analysis/render overlap); None means per_seg is complete up front.
+    Either way a segment is only touched once the render head enters its
+    bounds, so with overlap the render starts as soon as segment 0 is
+    done and waits never outlast the analysis lead."""
     import torch
     import PyNvVideoCodec as nvc
     from .mask import probe_fps, probe_pix_fmt
@@ -110,8 +116,21 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
 
     seg_bounds = [(float(s["start"]), float(s["end"])) for s in segments]
     starts = [a for a, _ in seg_bounds]
-    kf_index = {si: [e[0] for e in entries]
-                for si, entries in per_seg.items()}
+    # keyframe times per segment, built lazily: with the analysis/render
+    # overlap per_seg fills segment-by-segment just ahead of the render
+    # head, so a segment's index may only be built (and seg_ready waited
+    # on) once the head actually reaches that segment
+    kf_index: dict[int, list] = {}
+
+    def seg_entries(si: int) -> list:
+        """Segment si's analysis entries — blocking for them when the
+        analysis runs concurrently, and caching the keyframe-time index.
+        -> [] when the segment produced no masks (frames copy through)."""
+        if si not in kf_index:
+            if seg_ready is not None:
+                seg_ready(si)
+            kf_index[si] = [e[0] for e in (per_seg.get(si) or [])]
+        return per_seg.get(si) or []
 
     # full-res mask cache: (si, ki) -> (y bool (h,w), uv bool (h/2, w))
     mask_cache: dict[tuple, tuple] = {}
@@ -235,7 +254,7 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
                     si = bisect.bisect_right(starts, t_sec) - 1
                     if (0 <= si < len(seg_bounds)
                             and seg_bounds[si][0] <= t_sec <= seg_bounds[si][1]
-                            and per_seg.get(si)):
+                            and seg_entries(si)):
                         ki = max(0, bisect.bisect_right(kf_index[si], t_sec) - 1)
                         if held["si"] != si or held["ki"] != ki:
                             held = {"si": si, "ki": ki}
@@ -280,4 +299,4 @@ def render_gpu(video_path: str, out_path: str, segments: list[dict],
                 frames / src_fps / max(wall, 0.01))
     return {"frames": frames, "frames_masked": masked,
             "codec": "hevc_nvenc", "transport": "gpu-native",
-            "wall_time_s": round(wall, 2)}
+            "render_wall_s": round(wall, 2)}
