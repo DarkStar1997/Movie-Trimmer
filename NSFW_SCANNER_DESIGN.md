@@ -5,6 +5,14 @@ the build order are done: parity-tested detector (ORT + TRT backends), policy,
 temporal smoothing, `/scan` API, weight + scanner images on ghcr, bind-mounted
 engine cache. Remaining: real-movie threshold tuning, review UI, trimmer
 auto-submit wiring.
+
+**2026-11-05 update: NudeNet removed completely** (user decision, commit
+497c6a5) — the detector/policy/tracking chapters below are the historical
+record of a path that no longer ships. Discovery is VLM-first: RF-DETR
+person gate -> person-gated Qwen3-VL sweep/windows + crowd timestamps,
+validated across the GG/Saltburn/Wolf corpus (scans/VLM_RUNS.md). The
+detector-era sections stay for context; the code they describe is gone.
+
 Goal: replace hand-written cut timestamps with an automatic scan pass that finds
 NSFW / nudity / explicit-body-part segments in a movie and feeds them to the existing
 trimmer as `remove` segments. Gore/violence explicitly **out of scope**.

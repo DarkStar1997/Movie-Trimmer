@@ -70,3 +70,27 @@ sweep sim; your `scans/review2/` verdicts confirm or veto):
 
 If verdicts land mostly "drops right, new catches real", the NudeNet-free
 pipeline becomes the default and the NudeNet weights leave the image.
+
+## Verdict — NudeNet removed completely (2026-11-05)
+
+User decision on the adjudication material: **"Remove NudeNet completely.
+Not needed."** The NudeNet-free pipeline is the only pipeline; the
+review2/review3 adjudication queue is superseded — detector-only ranges
+stay dropped, the new catches stay in.
+
+Shipped as commit 497c6a5 (+ images scanner 3aac2e63 /
+allinone a0f2df11, pushed to GHCR):
+
+- `scanner/detector.py`, `policy.py`, `tracking.py` deleted; weak/
+  companion leads, person_points proxies, PRIO_WEAK tier gone from the
+  arbiter; mask.py is vlm-only (all-persons union + center fallback);
+  personseg keeps `persons_union`/`person_presence` only (match_box
+  machinery removed with its only consumer).
+- API: `/scan` loses `policy`/`model`/`backend`/`fp32`/`track`/
+  `detector`; `/mask` loses `policy`. Detector-era record fields stay as
+  empty structures for consumers. 110 tests green (smoke test now needs
+  no weights).
+- Docker: nudenet-weights stage + COPYs dropped from scanner.Dockerfile.
+
+Post-strip GG confirmation scan (NudeNet-free build, same env as the C
+stage measurement): see THROUGHPUT.md note below.
