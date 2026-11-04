@@ -218,6 +218,7 @@ scans/*
 !scans/BASELINES.md
 !scans/REPLAY_AB.md
 !scans/GUIDE_AB_RESULTS.md
+!scans/VLM_RUNS.md
 !scans/guide_cache/
 .replay/
 mask_outputs/
