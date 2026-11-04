@@ -236,3 +236,4 @@ mask_outputs/
 *.mpeg
 *.m2ts
 *.ts
+.sweep_sim/
