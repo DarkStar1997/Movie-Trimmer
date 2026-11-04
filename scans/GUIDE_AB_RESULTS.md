@@ -110,9 +110,15 @@ mechanism finding:
 
 Disposition:
 
-- **Corrected finals**: GG/SB re-rendered from the guide segment sets
-  minus the adjudicated FP ranges (+ the two still-flagged fp4 ranges
-  on SB); Wolf's guide output already matches the adjudication as-is.
+- **Corrected finals shipped (2026-11-04)**: `Gone.Girl.2014.masked.final.mp4`
+  (26 segs, 17,259 masked frames, gate 12/12 PASS), `Saltburn.2023.masked.final.mp4`
+  (46 segs, 39,976 masked frames, gate 12/12 PASS), and
+  `Wolf.of.Wall.Street.2013.masked.final.mp4` (the guide output renamed —
+  it already matched the adjudication; 65 segs, gate 10/10 PASS).
+  Rendered via explicit full-segment-dict /mask (labels preserved so
+  arbiter/crowd ranges keep all-person masking; bare [start,end] pairs
+  fall back to detector-box-only masks — learned the hard way, first
+  attempt failed its gate with 3,163 masked frames).
 - **guide=true stays opt-in** until validated on a movie with a
   Mild/None-rated guide — the leakage risk is untested in the
   under-tagging direction, which is where it would bite.
