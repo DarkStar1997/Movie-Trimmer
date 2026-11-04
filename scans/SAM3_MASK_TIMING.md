@@ -74,3 +74,28 @@ GG 17,007 · SB 40,473 · Wolf 42,676. Current segmentation share
 Bottom line: **SAM 3.1 (the way visiontouch ships it) costs ~5.4× the
 current segmenter per keyframe — +8 to +21 min per movie on these three.
 The unquantized FP32 variant is 26× and does not fit VRAM with the VLM.**
+
+## Measured: full SAM 3.1 renders (2026-11-04, after the timing bench)
+
+The three NudeNet-free scan segment sets re-rendered with
+`segmenter=sam3` (per-frame SAM 3.1 masks at native fps + temporal
+smoothing; identical segments/policy/smoothing to the `*.masked.vlm.mp4`
+renders — mask engine is the only variable). All verify gates ALL PASS.
+
+| | GG | SB | Wolf |
+|---|---|---|---|
+| mask keyframes | 17,008 | 40,481 | 42,688 |
+| frames masked (identical to vlm) | 16,997 | 40,497 | 42,675 |
+| analysis (SAM 3.1) wall | 12.0 m | ~24 m | ~27 m |
+| encode + mux wall | ~9.7 m | ~9.5 m | ~9.9 m |
+| mask-phase total (submit→done) | **22.1 m** | **33.6 m** | **36.9 m** |
+| — same movie on RF-DETR | 10.0 m | 12.7 m | 14.0 m |
+| — delta | +12.1 m | +20.9 m | +22.9 m |
+| verify gate | 11/11 | 11/11 | 10/10 |
+
+Projections held (bench: +8.4/+19.9/+21.0 m; measured +12/+21/+23 —
+encode ran ~1–2 m slower than the vlm renders, larger masks cost a
+little more per-frame apply). Outputs: `mask_outputs/*.masked.sam3.mp4`.
+Idle-GPU headroom (SM ≤12%) confirmed during both phases — throughput
+fixes (CUDA graphs / batching / pipelining) are available later if the
+quality verdict favors SAM 3.1.
