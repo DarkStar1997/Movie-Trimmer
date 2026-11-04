@@ -331,3 +331,54 @@ def _center_mask(h, w):
     m = np.zeros((h, w), dtype=bool)
     m[h // 4: 3 * h // 4, w // 4: 3 * w // 4] = True
     return m
+
+
+def test_analysis_pass_on_segment_delivers_entries_inline(tmp_path):
+    """The overlap contract (2026-11-05): on_segment(si, entries) must
+    deliver each segment's FINAL entries during the run — analysis_pass's
+    returned dict only exists once every segment is done, so overlap
+    consumers must take the data from the callback. The first overlap
+    build consumed a still-empty shared dict at callback time and the
+    render shipped those segments unmasked (caught by the verify gate:
+    seg 0 masked 7,676 px vs the baseline's 703,154)."""
+    import subprocess
+
+    from scanner.mask import analysis_pass
+
+    clip = str(tmp_path / "overlap.mp4")
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "testsrc2=size=640x270:rate=24",
+         "-t", "5", "-c:v", "libx264", "-pix_fmt", "yuv420p", clip],
+        check=True)
+    aw, ah = 160, 90
+    body = np.zeros((ah, aw), dtype=bool)
+    body[20:60, 40:100] = True
+
+    class _StaticSeg:
+        def all_persons(self, frame):
+            return body
+
+    segs = [{"start": 0.5, "end": 1.5, "labels": {"arbiter": 1}},
+            {"start": 2.5, "end": 3.5, "labels": {"arbiter": 1}}]
+    events: list = []
+    got: dict = {}
+
+    def on_segment(si, entries):
+        events.append(("cb", si))
+        got[si] = entries
+
+    ret = analysis_pass(clip, segs, Policy(), None, _StaticSeg(),
+                        aw, ah, on_segment=on_segment)
+    events.append(("ret", None))
+
+    # callbacks fired in segment order, all before the return existed
+    assert [si for kind, si in events[:-1] if kind == "cb"] == [0, 1]
+    assert events[-1] == ("ret", None)
+    # the delivered entries ARE the returned entries (same objects), and
+    # they are non-empty at callback time — the render may consume them
+    # the moment the callback fires
+    assert set(got) == set(ret) == {0, 1}
+    for si, entries in ret.items():
+        assert got[si] is entries
+        assert len(entries) > 0

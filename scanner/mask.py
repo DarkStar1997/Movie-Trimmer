@@ -372,10 +372,13 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
     segments (labels starting with 'cringemdb'). Both non-detector
     sources mask every person, with a center fallback.
 
-    on_segment(si) fires right after each segment's entries are final —
-    the analysis/render overlap hands the render its per-segment go
-    signal this way. Segments are processed in order, so callers may
-    rely on that ordering when consuming."""
+    on_segment(si, entries) fires right after each segment's entries are
+    final — the analysis/render overlap hands the render its per-segment
+    go signal this way, with the entries riding along (the returned dict
+    only exists once EVERY segment is done, so overlap consumers must
+    take the data from the callback, not wait for the return). Segments
+    are processed in order, so callers may rely on that ordering when
+    consuming."""
     kf_fps = config.MASK_KEYFRAME_FPS or min(probe_fps(video_path), 30.0)
     # dilation covers keyframe-hold motion; scaled to the analysis resolution
     dilate_px = max(3, int(round(config.MASK_DILATE_FRAC * aw)))
@@ -450,7 +453,7 @@ def analysis_pass(video_path: str, segments: list[dict], policy: Policy,
                                fb[0][2])
         per_seg[si] = entries
         if on_segment is not None:
-            on_segment(si)
+            on_segment(si, entries)
         logger.info("[mask] segment %d [%d-%d]%s: %d mask keyframes",
                     si, int(start), int(end),
                     " (vlm)" if vlm else "", len(entries))
@@ -659,7 +662,12 @@ def run_mask(video_path: str, segments: list[dict], out_path: str, *,
         import threading
         ready = {si: threading.Event() for si in range(len(segments))}
 
-        def _on_segment(si: int) -> None:
+        def _on_segment(si: int, entries: list) -> None:
+            # entries ride on the callback: analysis_pass's own dict only
+            # materializes when EVERY segment is done, far too late for
+            # the render head (this exact gap shipped segments unmasked
+            # in the first overlap build — caught by the verify gate)
+            per_seg[si] = entries
             ready[si].set()
 
         def _seg_ready(si: int) -> None:
@@ -676,9 +684,11 @@ def run_mask(video_path: str, segments: list[dict], out_path: str, *,
 
         def _analyze() -> None:
             try:
-                per_seg.update(analysis_pass(
-                    video_path, segments, policy, detector, segmenter,
-                    aw, ah, on_segment=_on_segment))
+                # per_seg is populated by _on_segment as segments finish;
+                # the return value adds nothing the callbacks haven't
+                # already delivered
+                analysis_pass(video_path, segments, policy, detector,
+                              segmenter, aw, ah, on_segment=_on_segment)
             except Exception as e:  # noqa: BLE001
                 analysis_err.append(e)
                 for ev in ready.values():   # wake every waiter to fail
