@@ -75,6 +75,15 @@ Bottom line: **SAM 3.1 (the way visiontouch ships it) costs ~5.4× the
 current segmenter per keyframe — +8 to +21 min per movie on these three.
 The unquantized FP32 variant is 26× and does not fit VRAM with the VLM.**
 
+## Verdict (user review, 2026-11-04)
+
+Mask-quality A/B across all three movies: SAM 3.1's improvement over
+the temporally-smoothed RF-DETR masks was **not significant enough** to
+justify the cost. Decision: **revert the SAM 3.1 integration** —
+stabilized RF-DETR masking stays. Integration (module, tokens, config,
+API field, Dockerfile stage) removed; this record and the bench remain
+for future reference (throughput work is moot with the revert).
+
 ## Measured: full SAM 3.1 renders (2026-11-04, after the timing bench)
 
 The three NudeNet-free scan segment sets re-rendered with

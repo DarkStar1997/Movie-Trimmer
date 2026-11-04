@@ -161,25 +161,6 @@ MASK_SMOOTH = os.environ.get("MASK_SMOOTH", "1").lower() not in (
     "0", "false", "no", "off")
 MASK_SMOOTH_ERODE_FRAC = float(os.environ.get("MASK_SMOOTH_ERODE_FRAC",
                                               "0.006"))
-# --- SAM 3.1 grounded segmenter (experimental; OFF by default) ------------
-# MASK_SEGMENTER selects the render/mask stage's person segmenter:
-# "rfdetr" (default, PersonSegmenter 432^2, ~6.7 ms/frame) or "sam3"
-# (SAM 3.1 grounded, visiontouch TRT recipe, ~36 ms/frame — see
-# scans/SAM3_MASK_TIMING.md). sam3 supports all-person masking only
-# (VLM-sourced segments); detector-box renders must stay on rfdetr.
-MASK_SEGMENTER = os.environ.get("MASK_SEGMENTER", "rfdetr").lower()
-SAM3_ONNX = os.environ.get(
-    "SAM3_ONNX", "/opt/models/sam3_grounding_fp8_dynk.onnx")
-SAM3_TOKENS = os.environ.get(
-    "SAM3_TOKENS", os.path.join(os.path.dirname(__file__),
-                                "sam3_tokens_person.npz"))
-SAM3_THRESH_PERSON = float(os.environ.get("SAM3_THRESH_PERSON", "0.5"))
-SAM3_KMIN = int(os.environ.get("SAM3_KMIN", "1"))
-SAM3_KOPT = int(os.environ.get("SAM3_KOPT", "3"))
-SAM3_KMAX = int(os.environ.get("SAM3_KMAX", "8"))
-SAM3_IN_SIZE = int(os.environ.get("SAM3_IN_SIZE", "1008"))
-SAM3_MAX_QUERIES = int(os.environ.get("SAM3_MAX_QUERIES", "16"))
-SAM3_WORKSPACE = int(os.environ.get("SAM3_WORKSPACE_GB", "20")) << 30
 # Fallback chain, first usable wins. NB: av1_nvenc is deliberately absent —
 # it fails with -22 EINVAL on this host/driver even bare (rawvideo-pipe path),
 # while hevc/h264 accept the full quality args. libx264 = CPU last resort.
