@@ -40,11 +40,14 @@ mask outputs). It also removes any foreign container squatting port 8081
 ## Scanning
 
 ```bash
-# full scan: person-gated VLM arbiter + CringeMDB crowd timestamps
+# full scan: person-gated VLM arbiter + CringeMDB crowd timestamps;
+# the IMDb parents-guide context is on by default (seeded cache,
+# fail-soft) — omit with -F guide=false
 curl -X POST http://localhost:8081/scan \
   -F video_path=/movies/film.mkv -F arbiter=true -F crowd=true
 
-# + IMDb parents-guide context for the arbiter's tie-break step (opt-in)
+# explicit guide request (same as the default; context loads from
+# scans/guide_cache when seeded for this film)
 curl -X POST http://localhost:8081/scan \
   -F video_path=/movies/film.mkv -F arbiter=true -F crowd=true -F guide=true
 
@@ -199,7 +202,7 @@ Key env knobs (all have sane defaults; see `scanner/config.py`):
 | `ARBITER_SELECT_MIN` | 400 | ≥ this many frames → one select-pass extraction, else per-seek |
 | `CROWD_CATEGORIES` | nudity,sex | in-scope crowd categories |
 | `CROWD_PAD_S` | 1.5 | padding around crowd ranges |
-| `GUIDE_CACHE_DIR` | scans/guide_cache | parents-guide context cache (guide=true; IMDb blocks live fetches, so guides are seeded here browser-assisted) |
+| `GUIDE_CACHE_DIR` | scans/guide_cache | parents-guide context cache (guide on by default; IMDb blocks live fetches, so guides are seeded here browser-assisted) |
 | `VLM_START_TIMEOUT_S` | 900 | llama-server bring-up budget |
 | `MASK_KEYFRAME_FPS` | 0 | mask analysis rate; 0 = every frame at native fps (capped 30) |
 | `MASK_OVERLAP` | 1 | overlap mask analysis on the encode (full renders) |

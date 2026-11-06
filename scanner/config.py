@@ -139,7 +139,10 @@ CROWD_CACHE_DIR = os.environ.get(
 # programmatic page fetches (Akamai), so guides are acquired
 # browser-assisted into GUIDE_CACHE_DIR/{tt}.json and read from cache;
 # a miss is a fail-soft no-op recorded in result['guide'].
-DEFAULT_GUIDE = False
+# Default ON (user decision 2026-11-07): the A/B on the three validated
+# movies (scans/GUIDE_AB_RESULTS.md) showed the tie-break context helps
+# borderline dim/graded scenes, and the fail-soft miss path is proven.
+DEFAULT_GUIDE = True
 GUIDE_CACHE_DIR = Path(os.environ.get(
     "GUIDE_CACHE_DIR",
     str(Path(__file__).resolve().parent.parent / "scans" / "guide_cache")))
