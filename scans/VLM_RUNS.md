@@ -94,3 +94,30 @@ allinone a0f2df11, pushed to GHCR):
 
 Post-strip GG confirmation scan (NudeNet-free build, same env as the C
 stage measurement): see THROUGHPUT.md note below.
+
+## Infinity Pool (2026-11-07) — guide default-on validation
+
+First run with `DEFAULT_GUIDE = True` (guide context on unless
+`guide=false`), on a fourth movie: Infinity Pool (2023), tt10365998,
+117 min h264 1080p. Guide seeded browser-assisted into
+`scans/guide_cache/tt10365998.json` (Chrome via browser-harness; IMDb's
+embedded page JSON mined directly — 4 nudity items, Severe 368/505).
+
+Submitted with **no explicit guide field** — exercising the default:
+
+- scan 720 s (decode+gate 189.2 · arbiter 502.6 · guide 1.0) →
+  **29 segments, 646 s flagged (9.2%)**, all `arbiter`-labeled
+- guide: `from_cache: true`, tt10365998, 1,115-char context block —
+  the default-on path works end-to-end from filename resolution
+- crowd: CringeMDB has no page for this film (deterministic slug
+  404s) — the fail-soft miss path exercised on a real movie;
+  `crowd.error` recorded, scan unaffected
+- render 511 s → 15,486 frames masked, 59 chapters (29 mask + 30
+  gap), output 1.77 GB (hevc p5)
+- verify 100 s → **ALL PASS 10/10** (spots auto-derived: 1 masked +
+  3 clean)
+- e2e 22:11 (scan 05:15 → verify 05:37)
+
+Images: scanner 182abd482056 / allinone 9c5b504e2067 (guide-default
+build) pushed to GHCR.
+
