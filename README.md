@@ -184,6 +184,9 @@ Source codecs covered: hevc 10-bit 16:9 and h264 8-bit 4:3.
 | `POST /verify` | async render gate (form: `video_path`+`output_path`, or `mask_id`; optional `masked_i[]`, `clean_t[]`) |
 | `GET /verify/{id}` | status → `checks[]`, `all_pass` |
 | `POST /chapters` | bake mask chapters into a render in place (`output_path` or `mask_id`, + `segments`/`scan_id`) |
+| `POST /trim/submit` | cut-list trim (the original tool): video upload **or** `video_path` (in-container, e.g. `/movies/film.mkv`) + REMOVE ranges (`00:10-00:20` or JSON) + optional `.srt`; NVENC av1 cut/concat, subtitles re-timed and re-merged as mov_text |
+| `GET /trim/jobs`, `GET /trim/jobs/{id}` | trim job list / status |
+| `GET /trim/download/{id}` | fetch the finished trimmed mp4 |
 | `GET /scans`, `GET /masks`, `GET /verifies` | lists |
 | `GET /health` | GPU/TRT state, model presence, on-demand VLM server state |
 
@@ -214,10 +217,12 @@ Key env knobs (all have sane defaults; see `scanner/config.py`):
 ```
 scanner/          the NSFW pipeline (decode, person gate, arbiter,
                   crowd, mask, verify, API) — packaged into the images
+main.py           the original trimmer — also mounted at /trim inside
+                  the appliance (cut-list trim + subtitle re-merge)
 scripts/          segments_table.py, person_probe.py, eval_gt.py, eval/
                   (prompt-replay harness — dev-time, host-side)
 docker/           entrypoints for the scanner / all-in-one images
-tests/            110 CPU-only tests: pytest tests/ -q
+tests/            117 CPU-only tests: pytest tests/ -q
 run.py            run the appliance (docker run --rm, port hygiene)
 build.py          build + push all images
 docker-compose.yml  alternative launch (same container, restart: unless-stopped)
@@ -251,6 +256,22 @@ after which scans start cold in seconds. Scan/mask artifacts land in
 
 ## The original trimmer
 
-`main.py` (port 8000) is the pre-scanner core: cut-list trimming with
-subtitle re-merging, frame-accurate, audio passthrough. A scan's segments
-feed it directly. See `ANALYSIS.md` for its code review.
+`main.py` is the pre-scanner core: cut-list trimming with subtitle
+re-merging, frame-accurate, audio passthrough. It now runs **inside the
+appliance too**, mounted at `/trim` (same process and port as the
+scanner — one container, every movie-fixing tool in one place), and its
+`/trim/submit` accepts an in-container `video_path` like `/scan` and
+`/mask` do, so movies can be trimmed straight from the `/movies` mount
+without an upload:
+
+```bash
+curl -X POST http://localhost:8081/trim/submit \
+  -F video_path=/movies/film.mkv \
+  -F 'segments=01:23:00-01:24:30'          # REMOVE ranges
+curl http://localhost:8081/trim/jobs/{id}  # -> completed
+curl -OJ http://localhost:8081/trim/download/{id}
+```
+
+A scan's segments feed it directly (remove instead of mask, when a cut
+is preferred). It also still runs standalone on port 8000
+(`python main.py`). See `ANALYSIS.md` for its code review.
