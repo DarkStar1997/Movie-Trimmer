@@ -370,5 +370,14 @@ def health():
     }
 
 
+# --- original trimmer: cut-list trimming + subtitle re-merge ------------------
+# The pre-scanner core (main.py, formerly a standalone :8000 service) is
+# mounted under /trim: one appliance, one port, every movie-fixing tool in
+# one place. NB: mounted sub-app lifespans never run — main.py mkdirs its
+# workspaces lazily instead (ensure_dirs).
+import main as _trimmer  # noqa: E402  (repo root; pysrt ships in the images)
+app.mount("/trim", _trimmer.app)
+
+
 # Backwards-compat alias so ScanResult import is used (kept for API docs)
 __all__ = ["app", "ScanResult"]

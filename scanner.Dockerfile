@@ -63,6 +63,9 @@ RUN pip install --no-cache-dir transformers==5.16.1 accelerate
 # zero-copy DLPack frames; pycuda NOT needed — context via torch)
 RUN pip install --no-cache-dir PyNvVideoCodec==2.2.3
 
+# original trimmer (main.py, mounted at /trim by scanner.main): srt parsing
+RUN pip install --no-cache-dir pysrt==1.1.2
+
 # weights baked in (single source of truth: the weight images). The VLM
 # arbiter ships in the sidecar image, not here — ARBITER_BASE_URL points
 # at it (docker-compose.yml); an unset base URL falls back to in-process
@@ -70,6 +73,7 @@ RUN pip install --no-cache-dir PyNvVideoCodec==2.2.3
 COPY --from=seg-weights /models/person_seg_rfdetr_seg_medium_v1.onnx /opt/models/
 
 COPY scanner/ /app/scanner/
+COPY main.py /app/main.py
 WORKDIR /app
 
 # engines land in the bind-mounted cache on first run (~1-3 min), then reuse

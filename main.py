@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 import pysrt
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 # --- Configuration ---
@@ -53,6 +53,14 @@ app = FastAPI(
 )
 
 # --- Helpers ---
+
+def ensure_dirs():
+    """Create workspaces on demand. Called at submit/processing time as
+    well, because when this app is mounted inside the scanner appliance
+    (scanner/main.py -> /trim) the mounted sub-app's lifespan never runs."""
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    FINISHED_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def parse_time_str(time_str: str) -> float:
     try:
@@ -167,9 +175,9 @@ async def background_video_processor(
     job_id: str, 
     input_path: str, 
     subtitle_path: Optional[str],
-    segments: List[List[float]]
+    segments: List[List[float]],
+    work_dir: str
 ):
-    work_dir = Path(input_path).parent
     final_output_filename = f"processed_{job_id}.mp4"
     final_output_path = FINISHED_DIR / final_output_filename
 
@@ -179,10 +187,12 @@ async def background_video_processor(
             logger.info(f"[Job {job_id}] Started processing...")
 
             loop = asyncio.get_event_loop()
+            ensure_dirs()
             await loop.run_in_executor(
                 None, 
                 _sync_ffmpeg_logic, 
-                job_id, input_path, subtitle_path, str(final_output_path), segments
+                job_id, input_path, subtitle_path, str(final_output_path), segments,
+                work_dir
             )
 
             job_store[job_id]["status"] = "completed"
@@ -194,15 +204,18 @@ async def background_video_processor(
         job_store[job_id]["status"] = "failed"
         job_store[job_id]["error"] = str(e)
     finally:
-        if work_dir.exists():
-            shutil.rmtree(work_dir)
+        # Only ever the job's own workspace. Path-submitted inputs live in
+        # the caller's tree (e.g. the read-only /movies mount) and are
+        # never modified or deleted.
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 def _sync_ffmpeg_logic(
     job_id: str, 
     input_path: str, 
     subtitle_path: Optional[str],
     output_path: str, 
-    remove_segments: List[List[float]]
+    remove_segments: List[List[float]],
+    work_dir: str
 ):
     total_duration = get_video_duration(input_path)
     
@@ -221,7 +234,7 @@ def _sync_ffmpeg_logic(
     if not keep_segments:
         raise ValueError("Removed segments cover the entire video.")
 
-    temp_dir = os.path.dirname(input_path)
+    temp_dir = work_dir
     
     # --- 1. Process Subtitles (if present) ---
     processed_srt_path = None
@@ -286,24 +299,46 @@ def _sync_ffmpeg_logic(
 @app.post("/submit", summary="Submit Video (+ optional Subtitle)")
 async def submit_job(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(..., description="Video File"),
+    request: Request,
+    file: Optional[UploadFile] = File(None, description="Video File (uploaded)"),
+    video_path: Optional[str] = Form(None, description="In-container path to a mounted video, e.g. /movies/film.mkv — read in place, never modified"),
     subtitle_file: Optional[UploadFile] = File(None, description="Optional .srt file"),
-    segments: str = Form(..., description="'00:00:00-00:00:10, ...'")
+    segments: str = Form(..., description="REMOVE ranges: '00:00-00:10, 00:20-00:30' or JSON [[start, end], ...]")
 ):
+    if not file and not video_path:
+        raise HTTPException(400, "Provide a video file or a video_path.")
+    if file and video_path:
+        raise HTTPException(400, "Provide either a video file or a video_path, not both.")
+
     job_id = str(uuid.uuid4())
+    ensure_dirs()
     work_dir = TEMP_DIR / job_id
-    work_dir.mkdir(exist_ok=True)
-    input_video_path = work_dir / f"input_{file.filename}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    input_video_path: str
+    original_filename: str
     input_sub_path = None
 
     try:
         # Validate segments
         segments_parsed = parse_segments_input(segments)
-        
-        # Save Video
-        with open(input_video_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        file.file.close()
+
+        if file is not None:
+            # Uploaded video: copy into the job workspace
+            original_filename = file.filename
+            dest = work_dir / f"input_{file.filename}"
+            with open(dest, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            file.file.close()
+            input_video_path = str(dest)
+        else:
+            # Path-submitted video (appliance style, like /scan and /mask):
+            # read directly from its location — no multi-GB upload, and the
+            # source tree (e.g. the read-only /movies mount) is untouched.
+            src = Path(video_path)
+            if not src.is_file():
+                raise HTTPException(400, f"video_path not found: {video_path}")
+            original_filename = src.name
+            input_video_path = str(src)
 
         # Save Subtitle (if provided)
         if subtitle_file:
@@ -318,15 +353,18 @@ async def submit_job(
                 shutil.copyfileobj(subtitle_file.file, buffer)
             subtitle_file.file.close()
 
+    except HTTPException:
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
     except Exception as e:
-        shutil.rmtree(work_dir)
+        shutil.rmtree(work_dir, ignore_errors=True)
         raise HTTPException(400, f"Submission failed: {str(e)}")
 
     # Queue Job
     job_store[job_id] = {
         "status": "queued",
         "submitted_at": datetime.now().isoformat(),
-        "original_filename": file.filename,
+        "original_filename": original_filename,
         "has_subtitles": bool(input_sub_path)
     }
     
@@ -335,15 +373,19 @@ async def submit_job(
         job_id, 
         str(input_video_path), 
         input_sub_path,
-        segments_parsed
+        segments_parsed,
+        str(work_dir)
     )
 
+    # root_path is "" standalone (port 8000) and "/trim" inside the scanner
+    # appliance, so the returned URLs are correct either way.
+    base = request.scope.get("root_path", "")
     return JSONResponse({
         "job_id": job_id,
         "status": "queued",
         "has_subtitles": bool(input_sub_path),
-        "status_url": f"/jobs/{job_id}",
-        "download_url": f"/download/{job_id}"
+        "status_url": f"{base}/jobs/{job_id}",
+        "download_url": f"{base}/download/{job_id}"
     })
 
 @app.get("/jobs", summary="List All Jobs")
