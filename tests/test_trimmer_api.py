@@ -87,3 +87,19 @@ def test_submit_accepts_upload_or_path():
     bodies = [s for s in schemas.values()
               if {"file", "video_path", "segments"} <= set(s.get("properties", {}))]
     assert bodies, "submit body must accept file, video_path and segments"
+    assert "output_name" in bodies[0]["properties"]
+
+
+def test_submit_is_async_202():
+    op = trimmer.app.openapi()["paths"]["/submit"]["post"]
+    assert "202" in op["responses"], "async submit must answer 202 like /scan"
+
+
+# --- client-provided names -----------------------------------------------------
+
+
+def test_safe_name_strips_paths_and_flattens():
+    assert trimmer._safe_name("../../etc/passwd", "video") == "passwd"
+    assert trimmer._safe_name("My Movie (2023)!.mp4", "video") == "My_Movie_2023_.mp4"
+    assert trimmer._safe_name("   ", "video") == "video"
+    assert trimmer._safe_name("", "fallback") == "fallback"

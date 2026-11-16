@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import uuid
 import subprocess
@@ -14,7 +15,7 @@ from datetime import datetime
 
 import pysrt
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 
 # --- Configuration ---
 TEMP_DIR = Path("temp_workspaces")
@@ -53,6 +54,15 @@ app = FastAPI(
 )
 
 # --- Helpers ---
+
+def _safe_name(name: str, fallback: str) -> str:
+    """Client-provided filename -> something safe to put on disk: paths
+    stripped, anything but boring characters flattened (same spirit as
+    scanner.jobs.safe_output_name; kept local so main.py stays
+    self-contained for the /trim mount)."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(name).name).strip("._- ")
+    return cleaned or fallback
+
 
 def ensure_dirs():
     """Create workspaces on demand. Called at submit/processing time as
@@ -176,9 +186,9 @@ async def background_video_processor(
     input_path: str, 
     subtitle_path: Optional[str],
     segments: List[List[float]],
-    work_dir: str
+    work_dir: str,
+    final_output_filename: str
 ):
-    final_output_filename = f"processed_{job_id}.mp4"
     final_output_path = FINISHED_DIR / final_output_filename
 
     try:
@@ -296,14 +306,15 @@ def _sync_ffmpeg_logic(
 
 # --- Endpoints ---
 
-@app.post("/submit", summary="Submit Video (+ optional Subtitle)")
+@app.post("/submit", summary="Submit Video (+ optional Subtitle)", status_code=202)
 async def submit_job(
     background_tasks: BackgroundTasks,
     request: Request,
     file: Optional[UploadFile] = File(None, description="Video File (uploaded)"),
     video_path: Optional[str] = Form(None, description="In-container path to a mounted video, e.g. /movies/film.mkv — read in place, never modified"),
     subtitle_file: Optional[UploadFile] = File(None, description="Optional .srt file"),
-    segments: str = Form(..., description="REMOVE ranges: '00:00-00:10, 00:20-00:30' or JSON [[start, end], ...]")
+    segments: str = Form(..., description="REMOVE ranges: '00:00-00:10, 00:20-00:30' or JSON [[start, end], ...]"),
+    output_name: Optional[str] = Form(None, description="Name for the trimmed file (sanitized; a short job suffix keeps it unique)")
 ):
     if not file and not video_path:
         raise HTTPException(400, "Provide a video file or a video_path.")
@@ -323,9 +334,10 @@ async def submit_job(
         segments_parsed = parse_segments_input(segments)
 
         if file is not None:
-            # Uploaded video: copy into the job workspace
-            original_filename = file.filename
-            dest = work_dir / f"input_{file.filename}"
+            # Uploaded video: copy into the job workspace (sanitized name —
+            # never trust a client filename with a path in it)
+            original_filename = _safe_name(file.filename, "video")
+            dest = work_dir / f"input_{original_filename}"
             with open(dest, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
             file.file.close()
@@ -360,6 +372,18 @@ async def submit_job(
         shutil.rmtree(work_dir, ignore_errors=True)
         raise HTTPException(400, f"Submission failed: {str(e)}")
 
+    # Final output name: caller's output_name (sanitized, short job suffix
+    # keeps it unique in FINISHED_DIR) or the classic processed_{id}.mp4
+    if output_name:
+        base = _safe_name(output_name, "trimmed")
+        stem, _, ext = base.rpartition(".")
+        if not stem or ext.lower() not in ("mp4", "mkv", "mov", "m4v"):
+            base = f"{base}.mp4"
+            ext = "mp4"
+        final_output_filename = f"{Path(base).stem}_{job_id[:8]}.{ext}"
+    else:
+        final_output_filename = f"processed_{job_id}.mp4"
+
     # Queue Job
     job_store[job_id] = {
         "status": "queued",
@@ -374,19 +398,21 @@ async def submit_job(
         str(input_video_path), 
         input_sub_path,
         segments_parsed,
-        str(work_dir)
+        str(work_dir),
+        final_output_filename
     )
 
-    # root_path is "" standalone (port 8000) and "/trim" inside the scanner
-    # appliance, so the returned URLs are correct either way.
+    # root_path is "" standalone and "/trim" inside the scanner appliance,
+    # so the returned URLs are correct either way.
     base = request.scope.get("root_path", "")
-    return JSONResponse({
+    return {
         "job_id": job_id,
         "status": "queued",
         "has_subtitles": bool(input_sub_path),
+        "output_file": final_output_filename,
         "status_url": f"{base}/jobs/{job_id}",
         "download_url": f"{base}/download/{job_id}"
-    })
+    }
 
 @app.get("/jobs", summary="List All Jobs")
 def list_jobs():
@@ -414,7 +440,3 @@ def download_file(job_id: str):
         raise HTTPException(500, "File missing from disk")
         
     return FileResponse(path=file_path, filename=filename, media_type="video/mp4")
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, timeout_keep_alive=300)
